@@ -2675,12 +2675,23 @@ static POINTER_BUTTON_CHANGE_TYPE get_button_change_type(UINT message, WORD new_
     return POINTER_CHANGE_NONE;  // = 0
 }
 
+static void pixel_to_himetric(POINT *pixel, POINT *himetric)
+{
+    HDC hdc = NtUserGetDC(NULL);
+    int dpi_x = hdc ? NtGdiGetDeviceCaps(hdc, LOGPIXELSX) : 96;
+    int dpi_y = hdc ? NtGdiGetDeviceCaps(hdc, LOGPIXELSY) : 96;
+    if (hdc) NtUserReleaseDC(NULL, hdc);
+    himetric->x = (pixel->x * 2540) / dpi_x;
+    himetric->y = (pixel->y * 2540) / dpi_y;
+}
+
 static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt, HWND hwnd )
 {
     struct pointer_thread_data *pointer_data;
     POINTER_INFO *info;
     UINT32 pointer_id = 1;  /* Mouse is always pointer ID 1 */
     WORD old_flags = 0;
+    POINT himetric_location;
     
     pointer_data = get_pointer_thread_data();
     if (!pointer_data) return;
@@ -2741,7 +2752,10 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
     info->ptPixelLocation.x = pt.x;
     info->ptPixelLocation.y = pt.y;
     info->ptPixelLocationRaw = pt;
-    
+
+    pixel_to_himetric(&pt, &himetric_location);
+    info->ptHimetricLocation = himetric_location;
+    info->ptHimetricLocationRaw = himetric_location;
     /* Store other info */
     info->hwndTarget = hwnd;
     info->dwTime = NtGetTickCount();
