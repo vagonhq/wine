@@ -2684,11 +2684,21 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
     {
         case WM_POINTERDOWN:
             info->pointerFlags |= POINTER_FLAG_DOWN;
-            info->ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_DOWN;
+            if (flags & POINTER_MESSAGE_FLAG_FIRSTBUTTON)
+                info->ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_DOWN;
+            else if (flags & POINTER_MESSAGE_FLAG_SECONDBUTTON)
+                info->ButtonChangeType = POINTER_CHANGE_SECONDBUTTON_DOWN;
+            else if (flags & POINTER_MESSAGE_FLAG_THIRDBUTTON)
+                info->ButtonChangeType = POINTER_CHANGE_THIRDBUTTON_DOWN;
             break;
         case WM_POINTERUP:
             info->pointerFlags |= POINTER_FLAG_UP;
-            info->ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_UP;
+            if (flags & POINTER_MESSAGE_FLAG_FIRSTBUTTON)
+                info->ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_UP;
+            else if (flags & POINTER_MESSAGE_FLAG_SECONDBUTTON)
+                info->ButtonChangeType = POINTER_CHANGE_SECONDBUTTON_UP;
+            else if (flags & POINTER_MESSAGE_FLAG_THIRDBUTTON)
+                info->ButtonChangeType = POINTER_CHANGE_THIRDBUTTON_UP;
             break;
         case WM_POINTERUPDATE:
             info->pointerFlags |= POINTER_FLAG_UPDATE;
