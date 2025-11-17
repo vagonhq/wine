@@ -2372,6 +2372,42 @@ static void send_parent_notify( HWND hwnd, WORD event, WORD idChild, POINT pt )
     }
 }
 
+static struct pointer_thread_data *get_pointer_thread_data(void)
+{
+    struct user_thread_info *thread_info = get_user_thread_info();
+    struct pointer_thread_data *data = thread_info->pointer_thread_data;
+    
+    if (!data)
+    {
+        data = thread_info->pointer_thread_data = calloc(1, sizeof(struct pointer_thread_data));
+        if (!data) return NULL;
+    }
+    
+    return data;
+}
+
+// static void cleanup_stale_pointers(struct pointer_thread_data *data)
+// {
+//     DWORD current_time = NtGetTickCount();
+//     DWORD timeout = 5000; /* 5 seconds timeout */
+//
+//     if (!data) return;
+//
+//     for (UINT32 i = 0; i < 32; i++)
+//     {
+//         if (!(data->active_pointers & (1 << i))) continue;
+//
+//         /* Check if pointer entry is stale */
+//         if (data->current[i].valid && 
+//             (current_time - data->current[i].timestamp > timeout))
+//         {
+//             TRACE("Cleaning up stale pointer: id=%u\n", i);
+//             data->current[i].valid = FALSE;
+//             data->active_pointers &= ~(1 << i);
+//         }
+//     }
+// }
+
 /***********************************************************************
  *          process_pointer_message
  *
@@ -2379,13 +2415,125 @@ static void send_parent_notify( HWND hwnd, WORD event, WORD idChild, POINT pt )
  */
 static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware_msg_data *msg_data )
 {
+    struct pointer_thread_data *pointer_data;
+    POINTER_INFO *info;
+    UINT32 pointer_id;
     RECT rect;
 
+    TRACE("process_pointer_message \n");
     SetRect( &rect, LOWORD(msg->lParam), HIWORD(msg->lParam), LOWORD(msg->lParam), HIWORD(msg->lParam) );
     rect = map_rect_raw_to_virt( rect, get_thread_dpi() );
     msg->lParam = MAKELPARAM(rect.left, rect.top);
 
     msg->pt = point_phys_to_win_dpi( msg->hwnd, msg->pt );
+    /* Get pointer ID from wParam (this is where X11 driver should put it) */
+    pointer_id = LOWORD(msg->wParam);
+    
+    /* Validate pointer ID */
+    if (pointer_id >= 32)
+    {
+        WARN("Invalid pointer ID: %u\n", pointer_id);
+        return TRUE; /* Don't fail the message, just skip storage */
+    }
+    
+    /* Get or create thread-local pointer data storage */
+    pointer_data = get_pointer_thread_data();
+    if (!pointer_data)
+    {
+        ERR("Failed to allocate pointer thread data\n");
+        return TRUE; /* Continue processing message even if storage fails */
+    }
+    
+    /* Check if hardware message data contains POINTER_INFO */
+    if (msg_data && msg_data->size >= sizeof(*msg_data) + sizeof(POINTER_INFO))
+    {
+        /* Extract POINTER_INFO from hardware message data */
+        info = (POINTER_INFO *)((char *)msg_data + sizeof(*msg_data));
+        
+        TRACE("Storing pointer info: id=%u, type=%d, pos=(%d,%d), flags=0x%x\n",
+              info->pointerId, info->pointerType, 
+              info->ptPixelLocation.x, info->ptPixelLocation.y, info->pointerFlags);
+        
+        /* Store pointer information in thread-local storage */
+        pointer_data->current[pointer_id].pointer_id = info->pointerId;
+        pointer_data->current[pointer_id].info = *info;
+        pointer_data->current[pointer_id].valid = TRUE;
+        pointer_data->current[pointer_id].timestamp = NtGetTickCount();
+        
+        /* Update active pointers bitmask */
+        pointer_data->active_pointers |= (1 << pointer_id);
+        pointer_data->last_update_time = NtGetTickCount();
+    }
+    else
+    {
+        /* 
+         * Fallback: No POINTER_INFO in msg_data, construct minimal info from MSG
+         * This handles cases where X11 driver sends basic pointer messages
+         */
+        POINTER_INFO minimal_info = {0};
+        
+        minimal_info.pointerType = PT_MOUSE;  /* Assume mouse if not specified */
+        minimal_info.pointerId = pointer_id;
+        minimal_info.ptPixelLocation.x = rect.left;
+        minimal_info.ptPixelLocation.y = rect.top;
+        minimal_info.ptPixelLocationRaw = minimal_info.ptPixelLocation;
+        minimal_info.dwTime = msg->time;
+        minimal_info.hwndTarget = msg->hwnd;
+        
+        /* Set flags based on message type */
+        minimal_info.pointerFlags = POINTER_FLAG_PRIMARY | POINTER_FLAG_INRANGE;
+        
+        switch (msg->message)
+        {
+            case WM_POINTERDOWN:
+                minimal_info.pointerFlags |= POINTER_FLAG_DOWN | POINTER_FLAG_INCONTACT | POINTER_FLAG_FIRSTBUTTON;
+                minimal_info.ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_DOWN;
+                break;
+                
+            case WM_POINTERUP:
+                minimal_info.pointerFlags |= POINTER_FLAG_UP;
+                minimal_info.ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_UP;
+                break;
+                
+            case WM_POINTERUPDATE:
+                minimal_info.pointerFlags |= POINTER_FLAG_UPDATE | POINTER_FLAG_INCONTACT;
+                minimal_info.ButtonChangeType = POINTER_CHANGE_NONE;
+                break;
+                
+            case WM_POINTERENTER:
+                minimal_info.pointerFlags |= POINTER_FLAG_NEW;
+                break;
+                
+            case WM_POINTERLEAVE:
+                minimal_info.pointerFlags |= POINTER_FLAG_UPDATE;
+                break;
+        }
+        
+        minimal_info.historyCount = 1;
+        
+        TRACE("Storing minimal pointer info: id=%u, pos=(%d,%d), msg=0x%x\n",
+              pointer_id, minimal_info.ptPixelLocation.x, minimal_info.ptPixelLocation.y, msg->message);
+        
+        /* Store the constructed info */
+        pointer_data->current[pointer_id].pointer_id = minimal_info.pointerId;
+        pointer_data->current[pointer_id].info = minimal_info;
+        pointer_data->current[pointer_id].valid = TRUE;
+        pointer_data->current[pointer_id].timestamp = NtGetTickCount();
+        
+        /* Update active pointers bitmask */
+        pointer_data->active_pointers |= (1 << pointer_id);
+        pointer_data->last_update_time = NtGetTickCount();
+    }
+    
+    /* Handle pointer leaving/up - mark as inactive */
+    if (msg->message == WM_POINTERUP || msg->message == WM_POINTERLEAVE)
+    {
+        TRACE("Deactivating pointer: id=%u\n", pointer_id);
+        pointer_data->current[pointer_id].valid = FALSE;
+        pointer_data->active_pointers &= ~(1 << pointer_id);
+    }
+    
+    TRACE("Active pointers: 0x%08x\n", pointer_data->active_pointers);
     return TRUE;
 }
 
@@ -2500,6 +2648,87 @@ static WORD pointer_buttons_from_mouse_buttons( WORD mouse_flags )
     return pointer_flags;
 }
 
+static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt, HWND hwnd )
+{
+    struct pointer_thread_data *pointer_data;
+    POINTER_INFO *info;
+    UINT32 pointer_id = 1;  /* Mouse is always pointer ID 1 */
+    
+    pointer_data = get_pointer_thread_data();
+    if (!pointer_data) return;
+    
+    info = &pointer_data->current[pointer_id].info;
+    
+    /* Fill POINTER_INFO from mouse message parameters */
+    info->pointerType = PT_MOUSE;
+    info->pointerId = pointer_id;
+    info->frameId = NtGetTickCount();  /* Or use a frame counter */
+    
+    /* Convert Wine's pointer flags to Windows POINTER_FLAGS */
+    info->pointerFlags = 0;
+    if (flags & POINTER_MESSAGE_FLAG_INRANGE)
+        info->pointerFlags |= POINTER_FLAG_INRANGE;
+    if (flags & POINTER_MESSAGE_FLAG_INCONTACT)
+        info->pointerFlags |= POINTER_FLAG_INCONTACT;
+    if (flags & POINTER_MESSAGE_FLAG_PRIMARY)
+        info->pointerFlags |= POINTER_FLAG_PRIMARY;
+    if (flags & POINTER_MESSAGE_FLAG_FIRSTBUTTON)
+        info->pointerFlags |= POINTER_FLAG_FIRSTBUTTON;
+    if (flags & POINTER_MESSAGE_FLAG_SECONDBUTTON)
+        info->pointerFlags |= POINTER_FLAG_SECONDBUTTON;
+    if (flags & POINTER_MESSAGE_FLAG_THIRDBUTTON)
+        info->pointerFlags |= POINTER_FLAG_THIRDBUTTON;
+    
+    /* Set pointer state flags based on message type */
+    switch (message)
+    {
+        case WM_POINTERDOWN:
+            info->pointerFlags |= POINTER_FLAG_DOWN;
+            info->ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_DOWN;
+            break;
+        case WM_POINTERUP:
+            info->pointerFlags |= POINTER_FLAG_UP;
+            info->ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_UP;
+            break;
+        case WM_POINTERUPDATE:
+            info->pointerFlags |= POINTER_FLAG_UPDATE;
+            info->ButtonChangeType = POINTER_CHANGE_NONE;
+            break;
+        default:
+            info->ButtonChangeType = POINTER_CHANGE_NONE;
+            break;
+    }
+    
+    /* Store position */
+    info->ptPixelLocation.x = pt.x;
+    info->ptPixelLocation.y = pt.y;
+    info->ptPixelLocationRaw = pt;
+    
+    /* Store other info */
+    info->hwndTarget = hwnd;
+    info->dwTime = NtGetTickCount();
+    info->historyCount = 1;
+    info->InputData = 0;
+    info->dwKeyStates = 0;  /* Could get from GetKeyState */
+    NtQueryPerformanceCounter((LARGE_INTEGER *)&info->PerformanceCount, NULL);
+    
+    /* Update entry state */
+    pointer_data->current[pointer_id].pointer_id = pointer_id;
+    pointer_data->current[pointer_id].valid = TRUE;
+    pointer_data->current[pointer_id].timestamp = NtGetTickCount();
+    pointer_data->active_pointers |= (1 << pointer_id);
+    
+    /* Handle pointer up - deactivate */
+    if (message == WM_POINTERUP)
+    {
+        pointer_data->current[pointer_id].valid = FALSE;
+        pointer_data->active_pointers &= ~(1 << pointer_id);
+    }
+    
+    TRACE("Updated pointer state: id=%u, pos=(%d,%d), flags=0x%x, msg=0x%x\n",
+          pointer_id, pt.x, pt.y, info->pointerFlags, message);
+}
+
 /***********************************************************************
  *          process_mouse_message
  *
@@ -2520,6 +2749,7 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
     WPARAM wparam;
 
     /* find the window to dispatch this mouse message to */
+    TRACE("process_mouse_message");
 
     info.cbSize = sizeof(info);
     NtUserGetGUIThreadInfo( GetCurrentThreadId(), &info );
@@ -2557,6 +2787,7 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
     {
         WORD flags = POINTER_MESSAGE_FLAG_INRANGE, pointer_button_flags;
         DWORD message = 0;
+        TRACE("process_mouse_message mouse in pointer\n");
 
         pointer_button_flags = pointer_buttons_from_mouse_buttons( LOWORD( msg->wParam ));
         if (pointer_button_flags) flags |= pointer_button_flags | POINTER_MESSAGE_FLAG_INCONTACT;
@@ -2600,7 +2831,9 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
             break;
         }
 
+        TRACE("dispatching pointer message %u\n", message);
         if (message) send_message( msg->hwnd, message, MAKELONG( 1, flags ), MAKELONG( msg->pt.x, msg->pt.y ) );
+        update_pointer_state_from_mouse( message, flags, msg->pt, msg->hwnd );
     }
 
     /* FIXME: is this really the right place for this hook? */
@@ -2792,9 +3025,13 @@ static BOOL process_hardware_message( MSG *msg, UINT hw_id, const struct hardwar
     else if (is_keyboard_message( msg->message ))
         ret = process_keyboard_message( msg, hw_id, hwnd_filter, first, last, remove );
     else if (is_mouse_message( msg->message ))
-        ret = process_mouse_message( msg, hw_id, msg_data->info, hwnd_filter, first, last, remove );
+        { 
+    TRACE("processing mouse message \n");
+    ret = process_mouse_message( msg, hw_id, msg_data->info, hwnd_filter, first, last, remove ); }
     else if (msg->message >= WM_POINTERUPDATE && msg->message <= WM_POINTERLEAVE)
-        ret = process_pointer_message( msg, hw_id, msg_data );
+        { 
+    TRACE("processing pointer message\n");
+    ret = process_pointer_message( msg, hw_id, msg_data ); }
     else if (msg->message == WM_WINE_CLIPCURSOR)
         process_wine_clipcursor( msg->hwnd, msg->wParam, msg->lParam );
     else if (msg->message == WM_WINE_SETCURSOR)

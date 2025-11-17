@@ -120,6 +120,21 @@ struct mouse_tracking_info
     POINT last_mouse_message_pos;
 };
 
+struct pointer_info_entry
+{
+    UINT32 pointer_id;
+    POINTER_INFO info;
+    BOOL valid;
+    DWORD timestamp;
+};
+
+struct pointer_thread_data
+{
+    struct pointer_info_entry current[32];  /* Current pointer states, indexed by pointer_id */
+    UINT32 active_pointers;                  /* Bitmask of active pointer IDs */
+    DWORD last_update_time;                  /* Timestamp of last update */
+};
+
 /* this is the structure stored in TEB->Win32ClientInfo */
 /* no attempt is made to keep the layout compatible with the Windows one */
 struct user_thread_info
@@ -143,6 +158,7 @@ struct user_thread_info
     DWORD                         clipping_reset;         /* time when clipping was last reset */
     struct session_thread_data   *session_data;           /* shared session thread data */
     struct mouse_tracking_info   *mouse_tracking_info;    /* NtUserTrackMouseEvent handling */
+    struct pointer_thread_data   *pointer_thread_data;
 };
 
 C_ASSERT( sizeof(struct user_thread_info) <= sizeof(((TEB *)0)->Win32ClientInfo) );

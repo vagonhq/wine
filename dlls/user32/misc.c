@@ -527,11 +527,15 @@ BOOL WINAPI GetPointerType(UINT32 id, POINTER_INPUT_TYPE *type)
 
 BOOL WINAPI GetPointerInfo(UINT32 id, POINTER_INFO *info)
 {
-    FIXME("(%d %p): stub\n", id, info);
-
-    SetLastError(ERROR_INVALID_PARAMETER);
-    return FALSE;
-}
+    UINT32 entry_count = 1, pointer_count = 0;
+    
+    if (!info)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    
+    return NtUserGetPointerInfoList(id, PT_POINTER, 0, 0, sizeof(POINTER_INFO), &entry_count, &pointer_count, info);}
 
 LRESULT WINAPI ImeWndProcA( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
 {

@@ -2832,16 +2832,194 @@ BOOL unregister_touch_window( HWND hwnd )
     return (win_flags & WIN_IS_TOUCH) != 0;
 }
 
+static struct pointer_thread_data *get_pointer_thread_data(void)
+{
+    struct user_thread_info *thread_info = get_user_thread_info();
+    struct pointer_thread_data *data = thread_info->pointer_thread_data;
+    
+    if (!data)
+    {
+        data = thread_info->pointer_thread_data = calloc(1, sizeof(struct pointer_thread_data));
+        if (!data) return NULL;
+    }
+    
+    return data;
+}
+
 /**********************************************************************
  *       NtUserGetPointerInfoList    (win32u.@)
  */
 BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_PTR unk0, UINT_PTR unk1, SIZE_T size,
                                       UINT32 *entry_count, UINT32 *pointer_count, void *pointer_info )
 {
-    FIXME( "id %#x, type %#x, unk0 %#zx, unk1 %#zx, size %#zx, entry_count %p, pointer_count %p, pointer_info %p stub!\n",
-           id, (int)type, (size_t)unk0, (size_t)unk1, (size_t)size, entry_count, pointer_count, pointer_info );
-    RtlSetLastWin32Error( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    struct pointer_thread_data *data;
+    POINTER_INFO *output = (POINTER_INFO *)pointer_info;
+    UINT32 count = 0;
+    UINT32 total = 0;
+    UINT32 max_entries;
+    UINT32 total_valid = 0;
+    
+    TRACE("id=%u, type=%d, size=%zu, entry_count=%p, pointer_count=%p, info=%p\n",
+          id, (int)type, (size_t)size, entry_count, pointer_count, pointer_info);
+    
+    /*
+     * STEP 1: Validate parameters
+     */
+    
+    /* entry_count and pointer_count are required output parameters */
+    if (!entry_count || !pointer_count)
+    {
+        WARN("NULL output parameter\n");
+        RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    
+    /* size must exactly match POINTER_INFO structure size */
+    if (size != sizeof(POINTER_INFO))
+    {
+        WARN("Invalid size: %zu (expected %zu)\n", (size_t)size, sizeof(POINTER_INFO));
+        RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    
+    /* Store max entries requested (for later use) */
+    max_entries = *entry_count;
+    
+    /*
+     * STEP 2: Get thread-local pointer data
+     * This data is populated by X11 driver when pointer events occur
+     */
+    
+    data = get_pointer_thread_data();
+    if (!data)
+    {
+        WARN("Failed to get pointer thread data\n");
+        RtlSetLastWin32Error(ERROR_OUTOFMEMORY);
+        return FALSE;
+    }
+    
+    for (UINT32 i = 0; i < 32; i++)
+    {
+        if (data->current[i].valid) total_valid++;
+    }
+
+    TRACE("active pointers %u last update %u total valid %u", data->active_pointers, data->last_update_time, total_valid);
+    /*
+     * STEP 3: Count active pointers matching the filter
+     */
+    
+    for (UINT32 i = 0; i < 32; i++)
+    {
+        /* Check if this pointer ID is active */
+        if (!(data->active_pointers & (1 << i)))
+            continue;
+        
+        /* Check if pointer is still valid (not timed out) */
+        if (!data->current[i].valid)
+            continue;
+        
+        /* Apply type filter (PT_POINTER means "any type") */
+        if (type != PT_POINTER && data->current[i].info.pointerType != type)
+            continue;
+        
+        total++;
+    }
+    
+    /* Always return total count of matching pointers */
+    *pointer_count = total;
+    
+    /*
+     * STEP 4: If pointer_info is NULL, caller just wants the count
+     * This is the standard Windows pattern for "query buffer size"
+     */
+    
+    if (!pointer_info)
+    {
+        *entry_count = 0;
+        TRACE("Returning count only: %u pointers\n", total);
+        return TRUE;
+    }
+    
+    /*
+     * STEP 5: Handle query for specific pointer ID
+     * When id != 0, return only that specific pointer
+     */
+    
+    if (id != 0)
+    {
+        /* Validate pointer ID range */
+        if (id >= 32)
+        {
+            WARN("Invalid pointer ID: %u\n", id);
+            RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        
+        /* Check if pointer exists and is valid */
+        if (!data->current[id].valid)
+        {
+            WARN("Pointer ID %u not active\n", id);
+            RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        
+        /* Apply type filter */
+        if (type != PT_POINTER && data->current[id].info.pointerType != type)
+        {
+            WARN("Pointer ID %u type mismatch (want %d, have %d)\n", 
+                 id, type, data->current[id].info.pointerType);
+            RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        
+        /* Copy the single pointer info */
+        output[0] = data->current[id].info;
+        *entry_count = 1;
+        
+        TRACE("Returning single pointer ID %u\n", id);
+        return TRUE;
+    }
+    
+    /*
+     * STEP 6: Return all matching active pointers
+     * Fill up to max_entries pointers into the output buffer
+     */
+    
+    for (UINT32 i = 0; i < 32 && count < max_entries; i++)
+    {
+        /* Skip inactive pointers */
+        if (!(data->active_pointers & (1 << i)))
+            continue;
+        
+        /* Skip invalid pointers */
+        if (!data->current[i].valid)
+            continue;
+        
+        /* Apply type filter */
+        if (type != PT_POINTER && data->current[i].info.pointerType != type)
+            continue;
+        
+        /* Copy pointer info to output buffer */
+        output[count] = data->current[i].info;
+        count++;
+    }
+    
+    /* Return actual number of entries copied */
+    *entry_count = count;
+    
+    /*
+     * STEP 7: Check if we have any data to return
+     */
+    
+    if (count == 0)
+    {
+        WARN("No pointer data available\n");
+        RtlSetLastWin32Error(ERROR_NO_DATA);
+        return FALSE;
+    }
+    
+    TRACE("Returning %u pointer(s)\n", count);
+    return TRUE;
 }
 
 BOOL get_clip_cursor( RECT *rect, UINT dpi, MONITOR_DPI_TYPE type )
