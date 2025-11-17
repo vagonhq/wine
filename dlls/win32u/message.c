@@ -2386,28 +2386,6 @@ static struct pointer_thread_data *get_pointer_thread_data(void)
     return data;
 }
 
-// static void cleanup_stale_pointers(struct pointer_thread_data *data)
-// {
-//     DWORD current_time = NtGetTickCount();
-//     DWORD timeout = 5000; /* 5 seconds timeout */
-//
-//     if (!data) return;
-//
-//     for (UINT32 i = 0; i < 32; i++)
-//     {
-//         if (!(data->active_pointers & (1 << i))) continue;
-//
-//         /* Check if pointer entry is stale */
-//         if (data->current[i].valid && 
-//             (current_time - data->current[i].timestamp > timeout))
-//         {
-//             TRACE("Cleaning up stale pointer: id=%u\n", i);
-//             data->current[i].valid = FALSE;
-//             data->active_pointers &= ~(1 << i);
-//         }
-//     }
-// }
-
 /***********************************************************************
  *          process_pointer_message
  *
@@ -2761,7 +2739,8 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
     info->dwTime = NtGetTickCount();
     info->historyCount = 1;
     info->InputData = 0;
-    info->dwKeyStates = 0;  /* Could get from GetKeyState */
+    info->dwKeyStates = (NtUserGetKeyState(VK_SHIFT) & 0x8000 ? 0x0004 : 0) |
+                        (NtUserGetKeyState(VK_CONTROL) & 0x8000 ? 0x0008 : 0);
     NtQueryPerformanceCounter((LARGE_INTEGER *)&info->PerformanceCount, NULL);
     
     /* Update entry state */
