@@ -258,11 +258,10 @@ POBJECT_TYPE WINAPI ObGetObjectType( void *object )
     return header->type;
 }
 
-static const WCHAR section_type_name[] = {'S','e','c','t','i','o','n',0};
-
 static struct _OBJECT_TYPE section_type =
 {
-    section_type_name
+    {},
+    RTL_CONSTANT_STRING( L"Section" )
 };
 
 static POBJECT_TYPE p_section_type = &section_type;
@@ -321,8 +320,7 @@ NTSTATUS kernel_object_from_handle( HANDLE handle, POBJECT_TYPE type, void **ret
             for (i = 0; i < ARRAY_SIZE(known_types); i++)
             {
                 type = *known_types[i];
-                if (!RtlCompareUnicodeStrings( type->name, lstrlenW(type->name), type_info->TypeName.Buffer,
-                                               type_info->TypeName.Length / sizeof(WCHAR), FALSE ))
+                if (!RtlCompareUnicodeString( &type->name, &type_info->TypeName, FALSE ))
                     break;
             }
             if (i == ARRAY_SIZE(known_types))
@@ -332,8 +330,7 @@ NTSTATUS kernel_object_from_handle( HANDLE handle, POBJECT_TYPE type, void **ret
                 return STATUS_INVALID_HANDLE;
             }
         }
-        else if (RtlCompareUnicodeStrings( type->name, lstrlenW(type->name), type_info->TypeName.Buffer,
-                                           type_info->TypeName.Length / sizeof(WCHAR), FALSE) )
+        else if (RtlCompareUnicodeString( &type->name, &type_info->TypeName, FALSE) )
         {
             LeaveCriticalSection( &handle_map_cs );
             return STATUS_OBJECT_TYPE_MISMATCH;
@@ -343,7 +340,7 @@ NTSTATUS kernel_object_from_handle( HANDLE handle, POBJECT_TYPE type, void **ret
             obj = type->constructor( handle );
         else
         {
-            FIXME( "No constructor for type %s\n", debugstr_w(type->name) );
+            FIXME( "No constructor for type %s\n", debugstr_us(&type->name) );
             obj = alloc_kernel_object( type, handle, 0, 0 );
         }
         if (!obj) status = STATUS_NO_MEMORY;
@@ -415,10 +412,9 @@ NTSTATUS WINAPI ObOpenObjectByPointer( void *obj, ULONG attr, ACCESS_STATE *acce
 
 static void *create_file_object( HANDLE handle );
 
-static const WCHAR file_type_name[] = {'F','i','l','e',0};
-
 static struct _OBJECT_TYPE file_type = {
-    file_type_name,
+    {},
+    RTL_CONSTANT_STRING( L"File" ),
     create_file_object
 };
 
@@ -1530,11 +1526,10 @@ static void free_driver_object( void *obj )
     free_kernel_object( driver );
 }
 
-static const WCHAR driver_type_name[] = {'D','r','i','v','e','r',0};
-
 static struct _OBJECT_TYPE driver_type =
 {
-    driver_type_name,
+    {},
+    RTL_CONSTANT_STRING( L"Driver" ),
     NULL,
     free_driver_object
 };
@@ -1608,11 +1603,10 @@ void WINAPI IoDeleteDriver( DRIVER_OBJECT *driver_object )
 }
 
 
-static const WCHAR device_type_name[] = {'D','e','v','i','c','e',0};
-
 static struct _OBJECT_TYPE device_type =
 {
-    device_type_name,
+    {},
+    RTL_CONSTANT_STRING( L"Device" )
 };
 
 POBJECT_TYPE IoDeviceObjectType = &device_type;
@@ -2464,22 +2458,62 @@ NTSTATUS WINAPI FsRtlRegisterUncProvider(PHANDLE MupHandle, PUNICODE_STRING Redi
 
 static void *create_process_object( HANDLE handle )
 {
+    char *p;
+    ULONG len;
+    HANDLE token;
     PEPROCESS process;
+    ANSI_STRING fullImageNameA;
+    UNICODE_STRING *fullImageNameW = NULL;
+
+    TRACE("handle %p\n", handle);
 
     if (!(process = alloc_kernel_object( PsProcessType, handle, sizeof(*process), 0 ))) return NULL;
 
     process->header.Type = 3;
     process->header.WaitListHead.Blink = INVALID_HANDLE_VALUE; /* mark as kernel object */
     NtQueryInformationProcess( handle, ProcessBasicInformation, &process->info, sizeof(process->info), NULL );
+    NtQueryInformationProcess( handle, ProcessSessionInformation, &process->session_id, sizeof(process->session_id), NULL );
+    NtQueryInformationProcess( handle, ProcessTimes, &process->times, sizeof(process->times), NULL );
+
+    /* get full image name */
+    NtQueryInformationProcess( handle, ProcessImageFileNameWin32, fullImageNameW, 0, &len );
+    fullImageNameW = calloc(len + 1, sizeof(WCHAR));
+    if (fullImageNameW)
+    {
+        fullImageNameW->MaximumLength = len + sizeof(WCHAR);
+        NtQueryInformationProcess( handle, ProcessImageFileNameWin32, fullImageNameW, len, &len );
+        if (fullImageNameW->Buffer)
+        {
+            RtlUnicodeStringToAnsiString(&fullImageNameA, fullImageNameW, TRUE);
+            if (fullImageNameA.Buffer)
+            {
+                /* generate short name */
+                for (p = fullImageNameA.Buffer + fullImageNameA.Length - 1; p > fullImageNameA.Buffer; p--)
+                {
+                    if (*(p-1) == '\\') break;
+                }
+                memcpy(process->imageName, p,
+                       min(fullImageNameA.Buffer + fullImageNameA.Length - p,
+                           sizeof(process->imageName)));
+                RtlFreeAnsiString(&fullImageNameA);
+            }
+        }
+        free(fullImageNameW);
+    }
+
     IsWow64Process( handle, &process->wow64 );
+
+    NtOpenProcessToken( handle, TOKEN_ALL_ACCESS, &token );
+    kernel_object_from_handle( token, SeTokenObjectType, &process->token );
+    NtClose( token );
+
     return process;
 }
 
-static const WCHAR process_type_name[] = {'P','r','o','c','e','s','s',0};
-
 static struct _OBJECT_TYPE process_type =
 {
-    process_type_name,
+    {},
+    RTL_CONSTANT_STRING( L"Process" ),
     create_process_object
 };
 
@@ -2523,6 +2557,15 @@ HANDLE WINAPI PsGetProcessId(PEPROCESS process)
 }
 
 /*********************************************************************
+ *           PsGetProcessPeb    (NTOSKRNL.@)
+ */
+PEB *WINAPI PsGetProcessPeb(PEPROCESS process)
+{
+    TRACE( "%p -> %p\n", process, process->info.PebBaseAddress );
+    return process->info.PebBaseAddress;
+}
+
+/*********************************************************************
  *           PsGetProcessInheritedFromUniqueProcessId  (NTOSKRNL.@)
  */
 HANDLE WINAPI PsGetProcessInheritedFromUniqueProcessId( PEPROCESS process )
@@ -2530,6 +2573,70 @@ HANDLE WINAPI PsGetProcessInheritedFromUniqueProcessId( PEPROCESS process )
     HANDLE id = (HANDLE)process->info.InheritedFromUniqueProcessId;
     TRACE( "%p -> %p\n", process, id );
     return id;
+}
+
+/*********************************************************************
+ *           PsGetProcessSessionId    (NTOSKRNL.@)
+ */
+ULONG WINAPI PsGetProcessSessionId( PEPROCESS process )
+{
+    TRACE("%p -> %lu\n", process, process->session_id);
+    return process->session_id;
+}
+
+/*********************************************************************
+ *           PsGetProcessCreateTimeQuadPart    (NTOSKRNL.@)
+ */
+LONGLONG WINAPI PsGetProcessCreateTimeQuadPart( PEPROCESS process )
+{
+    TRACE("%p -> %I64x\n", process, process->times.CreateTime.QuadPart);
+    return process->times.CreateTime.QuadPart;
+}
+
+/*********************************************************************
+ *           PsGetProcessExitStatus    (NTOSKRNL.@)
+ */
+NTSTATUS WINAPI PsGetProcessExitStatus( PEPROCESS process )
+{
+    PROCESS_BASIC_INFORMATION info;
+    HANDLE handle, id = PsGetProcessId(process);
+
+    if (!(handle = OpenProcess( PROCESS_ALL_ACCESS, FALSE, HandleToUlong(id) )))
+        return STATUS_SUCCESS;
+
+    NtQueryInformationProcess(handle, ProcessBasicInformation,
+                              &info, sizeof(info), NULL);
+    NtClose(handle);
+    TRACE("%p -> %lx\n", process, info.ExitStatus);
+    return info.ExitStatus;
+}
+
+/*********************************************************************
+ *           PsGetProcessExitProcessCalled    (NTOSKRNL.@)
+ */
+BOOL WINAPI PsGetProcessExitProcessCalled( PEPROCESS process )
+{
+    /* FIXME: not quite accurate */
+    return PsGetProcessExitStatus(process) != STATUS_PENDING;
+}
+
+/*********************************************************************
+ *           PsGetProcessImageFileName    (NTOSKRNL.@)
+ */
+const char *WINAPI PsGetProcessImageFileName( PEPROCESS process )
+{
+    TRACE("%p -> %s\n", process, debugstr_an(process->imageName, sizeof(process->imageName)));
+    return process->imageName;
+}
+
+/*********************************************************************
+ *           PsReferencePrimaryToken    (NTOSKRNL.@)
+ */
+PACCESS_TOKEN WINAPI PsReferencePrimaryToken( PEPROCESS process )
+{
+    TRACE("%p -> %p\n", process, process->token);
+    ObReferenceObject(process->token);
+    return process->token;
 }
 
 static void *create_thread_object( HANDLE handle )
@@ -2547,6 +2654,7 @@ static void *create_thread_object( HANDLE handle )
     if (!NtQueryInformationThread( handle, ThreadBasicInformation, &info, sizeof(info), NULL ))
     {
         thread->id = info.ClientId;
+        thread->teb = info.TebBaseAddress;
         if ((process = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, HandleToUlong(thread->id.UniqueProcess) )))
         {
             kernel_object_from_handle( process, PsProcessType, (void**)&thread->process );
@@ -2558,11 +2666,10 @@ static void *create_thread_object( HANDLE handle )
     return thread;
 }
 
-static const WCHAR thread_type_name[] = {'T','h','r','e','a','d',0};
-
 static struct _OBJECT_TYPE thread_type =
 {
-    thread_type_name,
+    {},
+    RTL_CONSTANT_STRING( L"Thread" ),
     create_thread_object
 };
 
@@ -2627,12 +2734,37 @@ HANDLE WINAPI PsGetThreadId(PETHREAD thread)
 }
 
 /*********************************************************************
+ *           PsGetThreadProcess    (NTOSKRNL.@)
+ */
+PEPROCESS WINAPI PsGetThreadProcess(PETHREAD thread)
+{
+    TRACE("%p -> %p\n", thread, thread->kthread.process);
+    return thread->kthread.process;
+}
+
+/*********************************************************************
  *           PsGetThreadProcessId    (NTOSKRNL.@)
  */
 HANDLE WINAPI PsGetThreadProcessId( PETHREAD thread )
 {
     TRACE( "%p -> %p\n", thread, thread->kthread.id.UniqueProcess );
     return thread->kthread.id.UniqueProcess;
+}
+
+/*********************************************************************
+ *           PsGetContextThread    (NTOSKRNL.@)
+ */
+NTSTATUS WINAPI PsGetContextThread(PETHREAD thread, CONTEXT *context)
+{
+    NTSTATUS status;
+    HANDLE handle, id = PsGetThreadId(thread);
+
+    if (!(handle = OpenThread(THREAD_ALL_ACCESS, FALSE, HandleToUlong(id))))
+        return STATUS_NOT_FOUND;
+
+    status = NtGetContextThread(handle, context);
+    NtClose(handle);
+    return status;
 }
 
 /***********************************************************************
@@ -2810,6 +2942,37 @@ void WINAPI KeRevertToUserAffinityThreadEx(KAFFINITY affinity)
 }
 
 /***********************************************************************
+ *           KeRegisterBugCheckCallback   (NTOSKRNL.EXE.@)
+ */
+BOOL WINAPI KeRegisterBugCheckCallback(void *record, void *routine,
+                                       void *buffer, ULONG length, char *component)
+{
+    FIXME("%p %p %p %lu %s stub!\n", record, routine, buffer, length, debugstr_a(component));
+
+    return TRUE;
+}
+
+/***********************************************************************
+ *           KeRegisterBugCheckReasonCallback   (NTOSKRNL.EXE.@)
+ */
+BOOL WINAPI KeRegisterBugCheckReasonCallback(void *record, void *routine, ULONG reason, char *component)
+{
+    FIXME("%p %p %lu %s stub!\n", record, routine, reason, debugstr_a(component));
+
+    return TRUE;
+}
+
+/***********************************************************************
+ *           KeDeregisterBugCheckReasonCallback   (NTOSKRNL.EXE.@)
+ */
+BOOL WINAPI KeDeregisterBugCheckReasonCallback(void *record)
+{
+    FIXME("%p stub!\n", record);
+
+    return TRUE;
+}
+
+/***********************************************************************
  *           IoRegisterFileSystem   (NTOSKRNL.EXE.@)
  */
 VOID WINAPI IoRegisterFileSystem(PDEVICE_OBJECT DeviceObject)
@@ -2946,6 +3109,37 @@ PHYSICAL_ADDRESS WINAPI MmGetPhysicalAddress(void *virtual_address)
 }
 
 /***********************************************************************
+ *           MmGetPhysicalMemoryRanges   (NTOSKRNL.EXE.@)
+ */
+PHYSICAL_MEMORY_RANGE *WINAPI MmGetPhysicalMemoryRanges(void)
+{
+    static volatile LONG once;
+    static PHYSICAL_MEMORY_RANGE range;
+    SYSTEM_BASIC_INFORMATION info;
+
+    TRACE("\n");
+
+    if (!InterlockedCompareExchange(&once, 1, 0))
+    {
+        NtQuerySystemInformation(SystemBasicInformation, &info, sizeof(info), NULL);
+        range.BaseAddress.QuadPart = info.MmLowestPhysicalPage;
+        range.NumberOfBytes.QuadPart = (ULONG64)info.MmNumberOfPhysicalPages * (ULONG64)info.PageSize;
+    }
+
+    return &range;
+}
+
+/***********************************************************************
+ *           MmGetVirtualForPhysical   (NTOSKRNL.EXE.@)
+ */
+void *WINAPI MmGetVirtualForPhysical(PHYSICAL_ADDRESS addr)
+{
+    ULONG_PTR ret = addr.QuadPart;
+    FIXME("(%p): semi-stub!\n", (void *)ret);
+    return (void *)ret;
+}
+
+/***********************************************************************
  *           MmMapIoSpace   (NTOSKRNL.EXE.@)
  */
 PVOID WINAPI MmMapIoSpace( PHYSICAL_ADDRESS PhysicalAddress, DWORD NumberOfBytes, DWORD CacheType )
@@ -3046,19 +3240,19 @@ NTSTATUS WINAPI ObReferenceObjectByName( UNICODE_STRING *ObjectName,
                                          POBJECT_TYPE ObjectType,
                                          KPROCESSOR_MODE AccessMode,
                                          void *ParseContext,
-                                         void **Object)
+                                         void **Object )
 {
+    NTSTATUS ret = STATUS_SUCCESS;
     struct wine_driver *driver;
     struct wine_rb_entry *entry;
 
-    TRACE("mostly-stub:%s %li %p %li %p %i %p %p\n", debugstr_us(ObjectName),
+    TRACE("%s %li %p %li %p %i %p %p\n", debugstr_us(ObjectName),
         Attributes, AccessState, DesiredAccess, ObjectType, AccessMode,
         ParseContext, Object);
 
     if (AccessState) FIXME("Unhandled AccessState\n");
     if (DesiredAccess) FIXME("Unhandled DesiredAccess\n");
     if (ParseContext) FIXME("Unhandled ParseContext\n");
-    if (ObjectType) FIXME("Unhandled ObjectType\n");
 
     if (AccessMode != KernelMode)
     {
@@ -3066,18 +3260,48 @@ NTSTATUS WINAPI ObReferenceObjectByName( UNICODE_STRING *ObjectName,
         return STATUS_NOT_IMPLEMENTED;
     }
 
-    EnterCriticalSection(&drivers_cs);
-    entry = wine_rb_get(&wine_drivers, ObjectName);
-    LeaveCriticalSection(&drivers_cs);
-    if (!entry)
+    if (!ObjectType || !Object || !ObjectName) return STATUS_INVALID_PARAMETER;
+
+    *Object = NULL;
+
+    if (!RtlCompareUnicodeString(&ObjectType->name, &IoDriverObjectType->name, FALSE))
     {
-        FIXME("Object (%s) not found, may not be tracked.\n", debugstr_us(ObjectName));
-        return STATUS_NOT_IMPLEMENTED;
+        EnterCriticalSection(&drivers_cs);
+        entry = wine_rb_get(&wine_drivers, ObjectName);
+        LeaveCriticalSection(&drivers_cs);
+        if (!entry)
+        {
+            FIXME("Object (%s) not found, may not be tracked.\n", debugstr_us(ObjectName));
+            return STATUS_NOT_FOUND;
+        }
+
+        driver = WINE_RB_ENTRY_VALUE(entry, struct wine_driver, entry);
+        ObReferenceObject( *Object = &driver->driver_obj );
+    } else {
+
+        SERVER_START_REQ(get_kernel_object_name)
+        {
+            req->manager = wine_server_obj_handle( get_device_manager() );
+            req->attributes = Attributes;
+            req->rootdir = 0;
+            wine_server_add_data(req, ObjectName->Buffer, ObjectName->Length);
+            if (!(ret = wine_server_call( req )))
+                *Object = wine_server_get_ptr( reply->user_ptr );
+        }
+        SERVER_END_REQ;
+
+        if (*Object)
+        {
+            if (ObGetObjectType( *Object ) != ObjectType)
+                ret = STATUS_OBJECT_TYPE_MISMATCH;
+            else
+                ObReferenceObject( *Object );
+        }
+
+        FIXME("ret %p %lx\n", *Object, ret);
     }
 
-    driver = WINE_RB_ENTRY_VALUE(entry, struct wine_driver, entry);
-    ObReferenceObject( *Object = &driver->driver_obj );
-    return STATUS_SUCCESS;
+    return ret;
 }
 
 
@@ -3186,6 +3410,15 @@ DEVICE_OBJECT* WINAPI IoGetAttachedDeviceReference( DEVICE_OBJECT *device )
     return result;
 }
 
+/***********************************************************************
+ *           IoGetBaseFileSystemDeviceObject   (NTOSKRNL.EXE.@)
+ */
+DEVICE_OBJECT *WINAPI IoGetBaseFileSystemDeviceObject( FILE_OBJECT *file )
+{
+    FIXME("%p -> %p semi-stub!\n", file, file->DeviceObject);
+    return file->DeviceObject;
+}
+
 
 /***********************************************************************
  *           PsCreateSystemThread   (NTOSKRNL.EXE.@)
@@ -3225,6 +3458,29 @@ HANDLE WINAPI PsGetCurrentThreadId(void)
     return KeGetCurrentThread()->id.UniqueThread;
 }
 
+/***********************************************************************
+ *           PsGetCurrentThreadTeb   (NTOSKRNL.EXE.@)
+ */
+TEB *WINAPI PsGetCurrentThreadTeb(void)
+{
+    return KeGetCurrentThread()->teb;
+}
+
+/***********************************************************************
+ *           PsGetCurrentThreadProcess   (NTOSKRNL.EXE.@)
+ */
+PEPROCESS WINAPI PsGetCurrentThreadProcess(void)
+{
+    return KeGetCurrentThread()->process;
+}
+
+/***********************************************************************
+ *           PsGetCurrentThreadProcess   (NTOSKRNL.EXE.@)
+ */
+HANDLE WINAPI PsGetCurrentThreadProcessId(void)
+{
+    return PsGetProcessId(PsGetCurrentThreadProcess());
+}
 
 /***********************************************************************
  *           PsIsSystemThread   (NTOSKRNL.EXE.@)
@@ -3725,7 +3981,17 @@ void WINAPI KeBugCheckEx(ULONG code, ULONG_PTR param1, ULONG_PTR param2, ULONG_P
  */
 void WINAPI ProbeForRead(void *address, SIZE_T length, ULONG alignment)
 {
-    FIXME("(%p %Iu %lu) stub\n", address, length, alignment);
+    TRACE("(%p %Iu %lu)\n", address, length, alignment);
+
+    if (length == 0) return;
+
+    if ((ULONG_PTR)address & (alignment-1))
+        RtlRaiseStatus(STATUS_DATATYPE_MISALIGNMENT);
+
+    if ((ULONG_PTR)address + length < (ULONG_PTR)address)
+        RtlRaiseStatus(STATUS_ACCESS_VIOLATION);
+
+    /* TODO: Check if within address space */
 }
 
 /***********************************************************************
@@ -3733,7 +3999,14 @@ void WINAPI ProbeForRead(void *address, SIZE_T length, ULONG alignment)
  */
 void WINAPI ProbeForWrite(void *address, SIZE_T length, ULONG alignment)
 {
-    FIXME("(%p %Iu %lu) stub\n", address, length, alignment);
+    TRACE("(%p %Iu %lu)\n", address, length, alignment);
+
+    if (length == 0) return;
+
+    ProbeForRead(address, length, alignment);
+
+    for (volatile char *p = address; p < (char *)address + length; p++)
+        *p |= 0;
 }
 
 /***********************************************************************
@@ -4294,9 +4567,43 @@ BOOLEAN WINAPI SePrivilegeCheck(PRIVILEGE_SET *privileges, SECURITY_SUBJECT_CONT
  */
 NTSTATUS WINAPI SeLocateProcessImageName(PEPROCESS process, UNICODE_STRING **image_name)
 {
-    FIXME("stub: %p %p\n", process, image_name);
-    if (image_name) *image_name = NULL;
-    return STATUS_NOT_IMPLEMENTED;
+    ULONG len;
+    NTSTATUS status;
+    HANDLE handle, id = PsGetProcessId(process);
+
+    TRACE("%p %p\n", process, image_name);
+
+    if (!image_name) return STATUS_INVALID_PARAMETER;
+
+    if (!(handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, HandleToUlong(id))))
+        return STATUS_NOT_FOUND;
+
+    NtQueryInformationProcess(handle, ProcessImageFileNameWin32, *image_name, 0, &len);
+
+    len += sizeof(WCHAR);
+
+    *image_name = ExAllocatePool(PagedPool, len);
+
+    if (!*image_name)
+    {
+        NtClose(handle);
+        return STATUS_NO_MEMORY;
+    }
+
+    (*image_name)->MaximumLength = len;
+
+    if ((status = NtQueryInformationProcess(handle, ProcessImageFileNameWin32,
+                                            *image_name, len - sizeof(WCHAR), &len)))
+    {
+        NtClose(handle);
+        return status;
+    }
+
+    TRACE("ret: %s\n", debugstr_us(*image_name));
+
+    NtClose(handle);
+
+    return STATUS_SUCCESS;
 }
 
 /*********************************************************************
@@ -4355,14 +4662,31 @@ void WINAPI KeLeaveGuardedRegion(void)
     FIXME("\n");
 }
 
-static const WCHAR token_type_name[] = {'T','o','k','e','n',0};
-
 static struct _OBJECT_TYPE token_type =
 {
-    token_type_name
+    {},
+    RTL_CONSTANT_STRING( L"Token" )
 };
 
 POBJECT_TYPE SeTokenObjectType = &token_type;
+
+NTSTATUS WINAPI SeQueryInformationToken(PACCESS_TOKEN token, TOKEN_INFORMATION_CLASS class, void **info)
+{
+    HANDLE handle;
+    NTSTATUS status;
+    /* FIXME: calculate size dynamically */
+    const ULONG size = 0x1000;
+    TRACE("%p %u %p\n", token, class, info);
+
+    if ((status = ObOpenObjectByPointer( token, OBJ_KERNEL_HANDLE, NULL, TOKEN_ALL_ACCESS, SeTokenObjectType, KernelMode, &handle )))
+        return status;
+
+    *info = ExAllocatePool(PagedPool, size);
+
+    if (!*info) return STATUS_NO_MEMORY;
+
+    return NtQueryInformationToken(handle, class, *info, size, NULL);
+}
 
 /*************************************************************************
  *           ExUuidCreate            (NTOSKRNL.@)
@@ -4635,6 +4959,14 @@ void WINAPI KeUnstackDetachProcess(KAPC_STATE *apc_state)
     FIXME("apc_state %p stub.\n", apc_state);
 }
 
+NTSTATUS WINAPI KeCapturePersistentThreadState(CONTEXT *context, PKTHREAD thread, ULONG code,
+                                               ULONG param1, ULONG param2, ULONG param3, ULONG param4, void *addr)
+{
+    FIXME("%p %p %lu %lu %lu %lu %lu %p", context, thread, code, param1, param2, param3, param4, addr);
+
+    return STATUS_NOT_IMPLEMENTED;
+}
+
 NTSTATUS WINAPI KdDisableDebugger(void)
 {
     FIXME(": stub.\n");
@@ -4686,6 +5018,19 @@ NTSTATUS WINAPI EtwUnregister(REGHANDLE handle)
     return STATUS_SUCCESS;
 }
 
+BOOL WINAPI VslGetSecurePciEnabled(void)
+{
+    FIXME("stub!\n");
+    return TRUE;
+}
+
+static NTSTATUS WINAPI driver_stub( DRIVER_OBJECT *driver, UNICODE_STRING *path )
+{
+    FIXME("%p %s stub!\n", driver, debugstr_us(path));
+
+    return STATUS_SUCCESS;
+}
+
 /*****************************************************
  *           DllMain
  */
@@ -4693,6 +5038,9 @@ BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
 {
     static void *handler;
     LARGE_INTEGER count;
+    UNICODE_STRING str = RTL_CONSTANT_STRING( L"\\Driver\\pci" );
+    UNICODE_STRING hidusb = RTL_CONSTANT_STRING( L"\\Driver\\hidusb" );
+    UNICODE_STRING disk = RTL_CONSTANT_STRING( L"\\Driver\\Disk" );
 
     switch(reason)
     {
@@ -4706,6 +5054,9 @@ BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
         ntoskrnl_heap = HeapCreate( HEAP_CREATE_ENABLE_EXECUTE, 0, 0 );
         dpc_call_tls_index = TlsAlloc();
         LdrRegisterDllNotification( 0, ldr_notify_callback, NULL, &ldr_notify_cookie );
+        IoCreateDriver(&str, driver_stub);
+        IoCreateDriver(&hidusb, driver_stub);
+        IoCreateDriver(&disk, driver_stub);
         break;
     case DLL_PROCESS_DETACH:
         LdrUnregisterDllNotification( ldr_notify_cookie );

@@ -1676,17 +1676,18 @@ __ASM_GLOBAL_FUNC( call_user_mode_callback,
                    "movq %rax,0xa8(%rsp)\n\t"  /* frame->syscall_cfa */
                    "movw %cs,0x78(%rsp)\n\t"   /* frame->cs */
                    "movw %ss,0x90(%rsp)\n\t"   /* frame->ss */
-                   "movq 0x328(%r8),%r10\n\t"  /* amd64_thread_data()->syscall_frame */
+                   "movq 0x328(%r8),%r14\n\t"  /* amd64_thread_data()->syscall_frame */
                    "movq (%r8),%rax\n\t"       /* NtCurrentTeb()->Tib.ExceptionList */
                    "movq %rax,0x300(%rsp,%rsi)\n\t"
-                   "movl 0xb0(%r10),%r14d\n\t" /* prev_frame->syscall_flags */
-                   "movl %r14d,0xb0(%rsp)\n\t" /* frame->syscall_flags */
-                   "movq %r10,0xa0(%rsp)\n\t"  /* frame->prev_frame */
+                   "movl 0xb0(%r14),%r10d\n\t" /* prev_frame->syscall_flags */
+                   "movl %r10d,0xb0(%rsp)\n\t" /* frame->syscall_flags */
+                   "movq %r14,0xa0(%rsp)\n\t"  /* frame->prev_frame */
                    "movq %rsp,0x328(%r8)\n\t"  /* amd64_thread_data()->syscall_frame */
                    /* switch to user stack */
                    "movq %rdi,%rsp\n\t"        /* user_rsp */
+                   "movq 0x98(%r14),%rbp\n\t"  /* prev_frame->rbp */
 #ifdef __linux__
-                   "testl $12,%r14d\n\t"       /* SYSCALL_HAVE_PTHREAD_TEB | SYSCALL_HAVE_WRFSGSBASE */
+                   "testl $12,%r10d\n\t"       /* SYSCALL_HAVE_PTHREAD_TEB | SYSCALL_HAVE_WRFSGSBASE */
                    "jz 1f\n\t"
                    "movw 0x338(%r8),%fs\n"     /* amd64_thread_data()->fs */
                    "1:\n\t"
@@ -1695,8 +1696,14 @@ __ASM_GLOBAL_FUNC( call_user_mode_callback,
                    "movq (%r10),%r10\n\t"
                    "test %r10,%r10\n\t"
                    "jz 1f\n\t"
-                   "xchgq %rcx,%r10\n\t"
-                   "1\t:jmpq *%rcx" )          /* func */
+                   "xchgq %rcx,%r10\n"
+                   "1:\n\t"
+                   "xor %rbx,%rbx\n\t"
+                   "xor %r12,%r12\n\t"
+                   "xor %r13,%r13\n\t"
+                   "xor %r14,%r14\n\t"
+                   "xor %r15,%r15\n\t"
+                   "jmpq *%rcx" )          /* func */
 
 
 /***********************************************************************
@@ -2007,14 +2014,22 @@ static void install_bpf(struct sigaction *sig_act)
 
     static struct sock_filter filter[] =
     {
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer) + 4),
-        /* Native libs are loaded at high addresses. */
-        BPF_JUMP(BPF_JMP | BPF_JGT | BPF_K, NATIVE_SYSCALL_ADDRESS_START >> 32, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         /* Allow i386. */
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
         BPF_JUMP (BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        /* Native libs are loaded at high addresses. */
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer) + 4),
+        BPF_JUMP(BPF_JMP | BPF_JGT | BPF_K, NATIVE_SYSCALL_ADDRESS_START >> 32, 0, 8),
+        /* High addresses may be top-down allocations, trap those */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x7fff, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer)),
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0xfe000000, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0xffff0000, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
         /* Allow wine64-preloader */
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer)),
         BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x7d400000, 1, 0),
@@ -2337,6 +2352,94 @@ static BOOL handle_syscall_trap( ucontext_t *sigcontext, siginfo_t *siginfo )
 }
 
 
+/***********************************************************************
+ *           check_invalid_gsbase
+ *
+ * Check for fault caused by invalid %gs value (some copy protection schemes mess with it).
+ */
+static inline BOOL check_invalid_gsbase( ucontext_t *ucontext )
+{
+    BYTE instr[16];
+    unsigned int i, len, prefix_count = 0;
+    TEB *teb = NtCurrentTeb();
+    ULONG_PTR cur_gsbase = 0;
+
+    if (CS_sig(ucontext) != cs64_sel) return FALSE;
+
+#ifdef __linux__
+    if (user_shared_data->ProcessorFeatures[PF_RDWRFSGSBASE_AVAILABLE])
+        __asm__("rdgsbase %0" : "=r" (cur_gsbase));
+    else
+        arch_prctl( ARCH_GET_GS, &cur_gsbase );
+#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+    amd64_get_gsbase( (void**)&cur_gsbase );
+#elif defined(__NetBSD__)
+    sysarch( X86_64_GET_GSBASE, &cur_gsbase );
+#elif defined(__APPLE__)
+    /* init_handler() has already reset GSBASE, we can't determine what it was before the signal */
+#endif
+
+    if (cur_gsbase == (ULONG_PTR)teb) return FALSE;
+
+    len = virtual_uninterrupted_read_memory( (BYTE *)RIP_sig(ucontext), instr, sizeof(instr) );
+    if (!len) return FALSE;
+
+    for (i = 0; i < len; i++)
+    {
+        switch (instr[i])
+        {
+        /* instruction prefixes */
+        case 0x2e:  /* %cs: */
+        case 0x36:  /* %ss: */
+        case 0x3e:  /* %ds: */
+        case 0x26:  /* %es: */
+        case 0x40:  /* rex */
+        case 0x41:  /* rex */
+        case 0x42:  /* rex */
+        case 0x43:  /* rex */
+        case 0x44:  /* rex */
+        case 0x45:  /* rex */
+        case 0x46:  /* rex */
+        case 0x47:  /* rex */
+        case 0x48:  /* rex */
+        case 0x49:  /* rex */
+        case 0x4a:  /* rex */
+        case 0x4b:  /* rex */
+        case 0x4c:  /* rex */
+        case 0x4d:  /* rex */
+        case 0x4e:  /* rex */
+        case 0x4f:  /* rex */
+        case 0x64:  /* %fs: */
+        case 0x66:  /* opcode size */
+        case 0x67:  /* addr size */
+        case 0xf0:  /* lock */
+        case 0xf2:  /* repne */
+        case 0xf3:  /* repe */
+            if (++prefix_count >= 15) return FALSE;
+            continue;
+        case 0x65:  /* %gs: */
+            break;
+        default:
+            return FALSE;
+        }
+        break;
+    }
+
+    TRACE( "gsbase %016lx teb %p at instr %p, fixing up\n", cur_gsbase, teb, instr );
+
+#ifdef __linux__
+    arch_prctl( ARCH_SET_GS, teb );
+#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+    amd64_set_gsbase( teb );
+#elif defined(__NetBSD__)
+    sysarch( X86_64_SET_GSBASE, &teb );
+#elif defined(__APPLE__)
+    /* leave_handler() will set GSBASE to the TEB */
+#endif
+    return TRUE;
+}
+
+
 /**********************************************************************
  *		segv_handler
  *
@@ -2388,7 +2491,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         rec.NumberParameters = 2;
         rec.ExceptionInformation[0] = (ERROR_sig(ucontext) >> 1) & 0x09;
         rec.ExceptionInformation[1] = (ULONG_PTR)siginfo->si_addr;
-        if (!virtual_handle_fault( &rec, (void *)RSP_sig(ucontext) ))
+        if (!virtual_handle_fault( &rec, (void *)RSP_sig(ucontext) ) || check_invalid_gsbase( ucontext ))
         {
             leave_handler( ucontext );
             return;
@@ -3383,7 +3486,7 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
 
                    /* pop rbp-based kernel stack cfi */
                    __ASM_CFI("\t.cfi_restore_state\n")
-                   "5:\tmovl $0xc000000d,%eax\n\t" /* STATUS_INVALID_PARAMETER */
+                   "5:\tmovl $0xc000001c,%eax\n\t" /* STATUS_INVALID_SYSTEM_SERVICE */
                    "movq %rsp,%rcx\n\t"
                    "jmp " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") )
 
@@ -3514,13 +3617,9 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
                    "pushq 0x70(%rcx)\n\t"          /* frame->rip */
                    "ret" )
 
-asm( ".data\n\t"
-     ".globl " __ASM_NAME("__wine_syscall_dispatcher_prolog_end_ptr") "\n"
-     __ASM_NAME("__wine_syscall_dispatcher_prolog_end_ptr") ":\n\t"
-     ".quad " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_prolog_end") "\n\t"
-     ".globl " __ASM_NAME("__wine_unix_call_dispatcher_prolog_end_ptr") "\n"
-     __ASM_NAME("__wine_unix_call_dispatcher_prolog_end_ptr") ":\n\t"
-     ".quad " __ASM_LOCAL_LABEL("__wine_unix_call_dispatcher_prolog_end") "\n\t"
-     ".text\n\t" );
+__ASM_GLOBAL_POINTER( __ASM_NAME("__wine_syscall_dispatcher_prolog_end_ptr"),
+                      __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_prolog_end") )
+__ASM_GLOBAL_POINTER( __ASM_NAME("__wine_unix_call_dispatcher_prolog_end_ptr"),
+                      __ASM_LOCAL_LABEL("__wine_unix_call_dispatcher_prolog_end") )
 
 #endif  /* __x86_64__ */

@@ -469,7 +469,6 @@ BOOL WINAPI UnloadKeyboardLayout( HKL layout )
     return FALSE;
 }
 
-
 static DWORD CALLBACK devnotify_window_callbackW(HANDLE handle, DWORD flags, DEV_BROADCAST_HDR *header)
 {
     TRACE_(rawinput)("handle %p, flags %#lx, header %p\n", handle, flags, header);
@@ -826,6 +825,29 @@ BOOL WINAPI SetGestureConfig( HWND hwnd, DWORD reserved, UINT count,
 {
     FIXME( "handle %p, reserved %#lx, count %u, config %p, size %u stub!\n",
            hwnd, reserved, count, config, size );
+    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+    return FALSE;
+}
+
+BOOL WINAPI GetPointerDeviceProperties( HANDLE device, UINT32 *count,
+                                        POINTER_DEVICE_PROPERTY *properties)
+{
+    FIXME( "device %p, count %p, info %p stub!\n", device, count, properties );
+    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+    return FALSE;
+}
+
+BOOL WINAPI GetPointerDeviceRects( HANDLE device, RECT *device_rect, RECT *display_rect )
+{
+    FIXME( "device %p, device_rect %p, display_rect %p stub!\n",
+           device, device_rect, display_rect );
+    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+    return FALSE;
+}
+
+BOOL WINAPI GetPointerPenInfo( UINT32 id, POINTER_PEN_INFO *info )
+{
+    FIXME( "id %u, info %p stub!\n", id, info );
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE;
 }

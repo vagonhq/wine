@@ -1023,8 +1023,8 @@ static NTSTATUS set_volume_info( struct volume *volume, struct dos_drive *drive,
         id = disk_device->unix_mount;
         id_len = strlen( disk_device->unix_mount ) + 1;
     }
-    if (volume->mount) set_mount_point_id( volume->mount, id, id_len );
-    if (drive && drive->mount) set_mount_point_id( drive->mount, id, id_len );
+    if (volume->mount) set_mount_point_id( volume->mount, id, id_len, -1 );
+    if (drive && drive->mount) set_mount_point_id( drive->mount, id, id_len, drive->drive );
 
     return STATUS_SUCCESS;
 }
@@ -1621,7 +1621,34 @@ static NTSTATUS query_property( struct disk_device *device, IRP *irp )
         }
         break;
     }
+    case StorageDeviceTrimProperty:
+    {
+        DEVICE_TRIM_DESCRIPTOR *d = irp->AssociatedIrp.SystemBuffer;
 
+        if (irpsp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(STORAGE_DESCRIPTOR_HEADER))
+        {
+            status = STATUS_INVALID_PARAMETER;
+        }
+        else
+        {
+            if (irpsp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(*d))
+            {
+                d->Version = d->Size = sizeof(*d);
+                irp->IoStatus.Information = sizeof(DEVICE_TRIM_DESCRIPTOR);
+            }
+            else
+            {
+                FIXME( "Faking StorageDeviceTrimProperty data.\n" );
+
+                memset( d, 0, sizeof(*d) );
+                d->TrimEnabled = TRUE;
+                d->Version = d->Size = sizeof(*d);
+                irp->IoStatus.Information = sizeof(*d);
+            }
+            status = STATUS_SUCCESS;
+        }
+        break;
+    }
     default:
         FIXME( "Unsupported property %#x\n", query->PropertyId );
         status = STATUS_NOT_SUPPORTED;
@@ -1921,7 +1948,7 @@ static BOOL create_port_device( DRIVER_OBJECT *driver, int n, const char *unix_p
     UNICODE_STRING nt_name, symlink_name, default_name;
     DEVICE_OBJECT *dev_obj;
     NTSTATUS status;
-    struct set_dosdev_symlink_params params = { dosdevices_path, unix_path };
+    struct set_dosdev_symlink_params params = { dosdevices_path, unix_path, driver == serial_driver };
 
     /* create DOS device */
     if (MOUNTMGR_CALL( set_dosdev_symlink, &params )) return FALSE;

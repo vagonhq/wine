@@ -49,6 +49,10 @@
 #ifdef HAVE_SYS_UN_H
 #include <sys/un.h>
 #endif
+#include <sys/ioctl.h>
+#ifdef HAVE_LINUX_IOCTL_H
+#include <linux/ioctl.h>
+#endif
 #ifdef HAVE_SYS_PRCTL_H
 # include <sys/prctl.h>
 #endif
@@ -86,6 +90,22 @@
 WINE_DEFAULT_DEBUG_CHANNEL(server);
 WINE_DECLARE_DEBUG_CHANNEL(client);
 WINE_DECLARE_DEBUG_CHANNEL(ftrace);
+
+/* just in case... */
+#undef EXT2_IOC_GETFLAGS
+#undef EXT2_IOC_SETFLAGS
+#undef EXT4_CASEFOLD_FL
+
+#ifdef __linux__
+
+/* Define the ext2 ioctls for handling extra attributes */
+#define EXT2_IOC_GETFLAGS _IOR('f', 1, long)
+#define EXT2_IOC_SETFLAGS _IOW('f', 2, long)
+
+/* Case-insensitivity attribute */
+#define EXT4_CASEFOLD_FL 0x40000000
+
+#endif
 
 #ifndef MSG_CMSG_CLOEXEC
 #define MSG_CMSG_CLOEXEC 0
@@ -185,18 +205,27 @@ static DECLSPEC_NORETURN void server_protocol_perror( const char *err )
  */
 static unsigned int send_request( const struct __server_request_info *req )
 {
-    unsigned int i;
-    int ret;
+    int request_fd = ntdll_get_thread_data()->request_fd;
 
     if (!req->u.req.request_header.request_size)
     {
-        if ((ret = write( ntdll_get_thread_data()->request_fd, &req->u.req,
-                          sizeof(req->u.req) )) == sizeof(req->u.req)) return STATUS_SUCCESS;
+        data_size_t to_write = sizeof(req->u.req);
+        const char *write_ptr = (const char *)&req->u.req;
 
+        for (;;)
+        {
+            ssize_t ret = write( request_fd, write_ptr, to_write );
+            if (ret == to_write) return STATUS_SUCCESS;
+            if (ret < 0) break;
+            to_write -= ret;
+            write_ptr += ret;
+        }
     }
     else
     {
+        data_size_t to_write = sizeof(req->u.req) + req->u.req.request_header.request_size;
         struct iovec vec[__SERVER_MAX_DATA+1];
+        unsigned int i, j;
 
         vec[0].iov_base = (void *)&req->u.req;
         vec[0].iov_len = sizeof(req->u.req);
@@ -205,11 +234,30 @@ static unsigned int send_request( const struct __server_request_info *req )
             vec[i+1].iov_base = (void *)req->data[i].ptr;
             vec[i+1].iov_len = req->data[i].size;
         }
-        if ((ret = writev( ntdll_get_thread_data()->request_fd, vec, i+1 )) ==
-            req->u.req.request_header.request_size + sizeof(req->u.req)) return STATUS_SUCCESS;
+
+        for (;;)
+        {
+            ssize_t ret = writev( request_fd, vec, i + 1 );
+            if (ret == to_write) return STATUS_SUCCESS;
+            if (ret < 0) break;
+            to_write -= ret;
+            for (j = 0; j < i + 1; j++)
+            {
+                if (ret >= vec[j].iov_len)
+                {
+                    ret -= vec[j].iov_len;
+                    vec[j].iov_len = 0;
+                }
+                else
+                {
+                    vec[j].iov_base = (char *)vec[j].iov_base + ret;
+                    vec[j].iov_len -= ret;
+                    break;
+                }
+            }
+        }
     }
 
-    if (ret >= 0) server_protocol_error( "partial write %d\n", ret );
     if (errno == EPIPE) abort_thread(0);
     if (errno == EFAULT) return STATUS_ACCESS_VIOLATION;
     server_protocol_perror( "write" );
@@ -799,7 +847,6 @@ unsigned int server_wait( const union select_op *select_op, data_size_t size, UI
     return ret;
 }
 
-
 /***********************************************************************
  *              NtContinue  (NTDLL.@)
  */
@@ -876,7 +923,7 @@ unsigned int server_queue_process_apc( HANDLE process, const union apc_call *cal
         }
         else
         {
-            NtWaitForSingleObject( handle, FALSE, NULL );
+            wait_internal_server( handle, FALSE, NULL );
 
             SERVER_START_REQ( get_apc_result )
             {
@@ -1273,6 +1320,28 @@ static const char *init_server_dir( dev_t dev, ino_t ino )
 
 
 /***********************************************************************
+ *           set_case_insensitive
+ *
+ * Make the supplied directory case insensitive, if available.
+ */
+static void set_case_insensitive(const char *dir)
+{
+#if defined(EXT2_IOC_GETFLAGS) && defined(EXT2_IOC_SETFLAGS) && defined(EXT4_CASEFOLD_FL)
+    int flags, fd;
+
+    if ((fd = open(dir, O_RDONLY | O_NONBLOCK | O_LARGEFILE)) == -1)
+        return;
+    if (ioctl(fd, EXT2_IOC_GETFLAGS, &flags) != -1 && !(flags & EXT4_CASEFOLD_FL))
+    {
+        flags |= EXT4_CASEFOLD_FL;
+        ioctl(fd, EXT2_IOC_SETFLAGS, &flags);
+    }
+    close(fd);
+#endif
+}
+
+
+/***********************************************************************
  *           setup_config_dir
  *
  * Setup the wine configuration dir.
@@ -1308,6 +1377,7 @@ static int setup_config_dir(void)
     if (!mkdir( "dosdevices", 0777 ))
     {
         mkdir( "drive_c", 0777 );
+        set_case_insensitive( "drive_c" );
         symlink( "../drive_c", "dosdevices/c:" );
         symlink( "/", "dosdevices/z:" );
     }
@@ -1810,12 +1880,17 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
         return result.dup_handle.status;
     }
 
+    /* hold fd_cache_mutex to prevent the fd from being added again between the
+     * call to remove_fd_from_cache and close_handle */
     server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
 
     /* always remove the cached fd; if the server request fails we'll just
      * retrieve it again */
     if (options & DUPLICATE_CLOSE_SOURCE)
+    {
         fd = remove_fd_from_cache( source );
+        close_inproc_sync_obj( source );
+    }
 
     SERVER_START_REQ( dup_handle )
     {
@@ -1881,11 +1956,16 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
     if (HandleToLong( handle ) >= ~5 && HandleToLong( handle ) <= ~0)
         return STATUS_SUCCESS;
 
+
+    /* hold fd_cache_mutex to prevent the fd from being added again between the
+     * call to remove_fd_from_cache and close_handle */
     server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
 
     /* always remove the cached fd; if the server request fails we'll just
      * retrieve it again */
     fd = remove_fd_from_cache( handle );
+
+    close_inproc_sync_obj( handle );
 
     if (do_fsync())
         fsync_close( handle );

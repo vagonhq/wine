@@ -1230,16 +1230,16 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
     }
 
     if (context->ContextFlags & (CONTEXT_INTEGER & ~CONTEXT_i386))
-        TRACE( "%p: eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esi=%08lx edi=%08lx\n", handle,
+        TRACE( "%p: eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x\n", handle,
                context->Eax, context->Ebx, context->Ecx, context->Edx, context->Esi, context->Edi );
     if (context->ContextFlags & (CONTEXT_CONTROL & ~CONTEXT_i386))
-        TRACE( "%p: ebp=%08lx esp=%08lx eip=%08lx cs=%04lx ss=%04lx flags=%08lx\n", handle,
+        TRACE( "%p: ebp=%08x esp=%08x eip=%08x cs=%04x ss=%04x flags=%08x\n", handle,
                context->Ebp, context->Esp, context->Eip, context->SegCs, context->SegSs, context->EFlags );
     if (context->ContextFlags & (CONTEXT_SEGMENTS & ~CONTEXT_i386))
-        TRACE( "%p: ds=%04lx es=%04lx fs=%04lx gs=%04lx\n", handle,
+        TRACE( "%p: ds=%04x es=%04x fs=%04x gs=%04x\n", handle,
                context->SegDs, context->SegEs, context->SegFs, context->SegGs );
     if (context->ContextFlags & (CONTEXT_DEBUG_REGISTERS & ~CONTEXT_i386))
-        TRACE( "%p: dr0=%08lx dr1=%08lx dr2=%08lx dr3=%08lx dr6=%08lx dr7=%08lx\n", handle,
+        TRACE( "%p: dr0=%08x dr1=%08x dr2=%08x dr3=%08x dr6=%08x dr7=%08x\n", handle,
                context->Dr0, context->Dr1, context->Dr2, context->Dr3, context->Dr6, context->Dr7 );
 
     return STATUS_SUCCESS;
@@ -1363,7 +1363,7 @@ static inline BOOL check_invalid_gs( ucontext_t *sigcontext, CONTEXT *context )
         instr++;
         continue;
     case 0x65:  /* %gs: */
-        TRACE( "%04lx/%04x at %p, fixing up\n", context->SegGs, system_gs, instr );
+        TRACE( "%04x/%04x at %p, fixing up\n", context->SegGs, system_gs, instr );
         GS_sig(sigcontext) = system_gs;
         return TRUE;
     default:
@@ -1881,14 +1881,14 @@ static BOOL handle_syscall_fault( ucontext_t *sigcontext, void *stack_ptr,
 
     if (!is_inside_syscall( sigcontext )) return FALSE;
 
-    TRACE( "code=%lx flags=%lx addr=%p ip=%08lx\n",
+    TRACE( "code=%x flags=%x addr=%p ip=%08x\n",
            rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress, context->Eip );
     for (i = 0; i < rec->NumberParameters; i++)
         TRACE( " info[%d]=%08lx\n", i, rec->ExceptionInformation[i] );
-    TRACE(" eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esi=%08lx edi=%08lx\n",
+    TRACE(" eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x\n",
           context->Eax, context->Ebx, context->Ecx,
           context->Edx, context->Esi, context->Edi );
-    TRACE(" ebp=%08lx esp=%08lx cs=%04lx ds=%04lx es=%04lx fs=%04lx gs=%04lx flags=%08lx\n",
+    TRACE(" ebp=%08x esp=%08x cs=%04x ds=%04x es=%04x fs=%04x gs=%04x flags=%08x\n",
           context->Ebp, context->Esp, context->SegCs, context->SegDs,
           context->SegEs, context->SegFs, context->SegGs, context->EFlags );
 
@@ -1910,10 +1910,10 @@ static BOOL handle_syscall_fault( ucontext_t *sigcontext, void *stack_ptr,
     }
     else
     {
-        WINE_BACKTRACE_LOG( "--- Exception %#lx at %s.\n", rec->ExceptionCode,
+        WINE_BACKTRACE_LOG( "--- Exception %#x at %s.\n", rec->ExceptionCode,
                             wine_debuginfostr_pc( rec->ExceptionAddress ));
 
-        TRACE( "returning to user mode ip=%08x ret=%08lx\n", frame->eip, rec->ExceptionCode );
+        TRACE( "returning to user mode ip=%08x ret=%08x\n", frame->eip, rec->ExceptionCode );
         stack = (UINT *)frame;
         *(--stack) = rec->ExceptionCode;
         *(--stack) = (UINT)frame;
@@ -2419,7 +2419,7 @@ NTSTATUS get_thread_ldt_entry( HANDLE handle, void *data, ULONG len, ULONG *ret_
                 if (reply->flags)
                     info->Entry = ldt_make_entry( (void *)reply->base, reply->limit, reply->flags );
                 else
-                    status = STATUS_UNSUCCESSFUL;
+                    status = STATUS_ACCESS_VIOLATION;
             }
         }
         SERVER_END_REQ;
@@ -2441,8 +2441,6 @@ NTSTATUS WINAPI NtSetLdtEntries( ULONG sel1, LDT_ENTRY entry1, ULONG sel2, LDT_E
     sigset_t sigset;
 
     if (sel1 >> 16 || sel2 >> 16) return STATUS_INVALID_LDT_DESCRIPTOR;
-    if (sel1 && (sel1 >> 3) < first_ldt_entry) return STATUS_INVALID_LDT_DESCRIPTOR;
-    if (sel2 && (sel2 >> 3) < first_ldt_entry) return STATUS_INVALID_LDT_DESCRIPTOR;
 
     server_enter_uninterrupted_section( &ldt_mutex, &sigset );
     if (sel1) ldt_set_entry( sel1, entry1 );
@@ -2709,8 +2707,7 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    __ASM_CFI(".cfi_adjust_cfa_offset 4\n\t")
                    "popl 0x04(%ecx)\n\t"           /* frame->eflags */
                    __ASM_CFI(".cfi_adjust_cfa_offset -4\n\t")
-                   ".globl " __ASM_NAME("__wine_syscall_dispatcher_prolog_end") "\n"
-                   __ASM_NAME("__wine_syscall_dispatcher_prolog_end") ":\n\t"
+                   __ASM_GLOBL(__ASM_NAME("__wine_syscall_dispatcher_prolog_end")) "\n\t"
                    "movl %esp,0x0c(%ecx)\n\t"      /* frame->esp */
                    __ASM_CFI_CFA_IS_AT1(ecx, 0x0c)
                    "movw %cs,0x10(%ecx)\n\t"
@@ -2898,8 +2895,7 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
                    "popl 0x08(%ecx)\n\t"       /* frame->eip */
                    __ASM_CFI(".cfi_adjust_cfa_offset -4\n\t")
                    __ASM_CFI_REG_IS_AT1(eip, ecx, 0x08)
-                   ".globl " __ASM_NAME("__wine_unix_call_dispatcher_prolog_end") "\n"
-                   __ASM_NAME("__wine_unix_call_dispatcher_prolog_end") ":\n\t"
+                   __ASM_GLOBL(__ASM_NAME("__wine_unix_call_dispatcher_prolog_end")) "\n\t"
                    "leal 0x10(%esp),%edx\n\t"
                    "movl %edx,0x0c(%ecx)\n\t"  /* frame->esp */
                    __ASM_CFI_CFA_IS_AT1(ecx, 0x0c)

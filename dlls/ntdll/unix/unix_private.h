@@ -114,6 +114,7 @@ struct ntdll_thread_data
     PRTL_THREAD_START_ROUTINE start;  /* thread entry point */
     void              *param;         /* thread entry point parameter */
     void              *jmp_buf;       /* setjmp buffer for exception handling */
+    int               linux_alert_obj;  /* fd for the linux in-process alert event */
 };
 
 C_ASSERT( sizeof(struct ntdll_thread_data) <= sizeof(((TEB *)0)->GdiTebBatch) );
@@ -130,6 +131,7 @@ struct async_fileio
 {
     async_callback_t    *callback;
     struct async_fileio *next;
+    DWORD                size;
     HANDLE               handle;
 };
 
@@ -192,6 +194,7 @@ extern SYSTEM_CPU_INFORMATION cpu_info;
 extern struct ldt_copy __wine_ldt_copy;
 #endif
 
+extern BOOL disable_sfn;
 extern BOOL ac_odyssey;
 extern BOOL fsync_simulate_sched_quantum;
 extern BOOL alert_simulate_sched_quantum;
@@ -220,6 +223,10 @@ extern NTSTATUS load_main_exe( const WCHAR *name, const char *unix_name, const W
 extern NTSTATUS load_start_exe( WCHAR **image, void **module );
 extern ULONG_PTR redirect_arm64ec_rva( void *module, ULONG_PTR rva, const IMAGE_ARM64EC_METADATA *metadata );
 extern void start_server( BOOL debug );
+
+extern pthread_mutex_t fd_cache_mutex;
+
+extern int get_linux_sync_device(void);
 
 extern unsigned int server_call_unlocked( void *req_ptr );
 extern void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset );
@@ -401,6 +408,8 @@ extern NTSTATUS wow64_wine_spawnvp( void *args );
 
 extern void dbg_init(void);
 
+extern void close_inproc_sync_obj( HANDLE handle );
+
 extern NTSTATUS call_user_apc_dispatcher( CONTEXT *context_ptr, ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3,
                                           PNTAPCFUNC func, NTSTATUS status );
 extern NTSTATUS call_user_exception_dispatcher( EXCEPTION_RECORD *rec, CONTEXT *context );
@@ -411,6 +420,7 @@ extern void call_raise_user_exception_dispatcher(void);
 extern const char * wine_debuginfostr_pc(void *pc);
 
 #define TICKSPERSEC 10000000
+#define NSECPERSEC (LONG64)1000000000
 #define SECS_1601_TO_1970  ((369 * 365 + 89) * (ULONGLONG)86400)
 
 static inline ULONGLONG ticks_from_time_t( time_t time )

@@ -232,7 +232,7 @@ static void load_function_driver( DEVICE_OBJECT *device, HDEVINFO set, SP_DEVINF
     lstrcatW( buffer, driver );
     RtlInitUnicodeString( &string, buffer );
     if (ObReferenceObjectByName( &string, OBJ_CASE_INSENSITIVE, NULL,
-                                 0, NULL, KernelMode, NULL, (void **)&driver_obj ) != STATUS_SUCCESS)
+                                 0, IoDriverObjectType, KernelMode, NULL, (void **)&driver_obj ) != STATUS_SUCCESS)
     {
         ERR("Failed to locate loaded driver %s.\n", debugstr_w(driver));
         return;
@@ -596,14 +596,13 @@ NTSTATUS WINAPI IoGetDeviceProperty( DEVICE_OBJECT *device, DEVICE_REGISTRY_PROP
         {
             WCHAR *id, *ptr;
 
-            status = get_device_id( device, BusQueryInstanceID, &id );
+            status = get_device_id( device, BusQueryDeviceID, &id );
             if (status != STATUS_SUCCESS)
             {
                 ERR("Failed to get instance ID, status %#lx.\n", status);
                 break;
             }
 
-            wcsupr( id );
             ptr = wcschr( id, '\\' );
             if (ptr) *ptr = 0;
 

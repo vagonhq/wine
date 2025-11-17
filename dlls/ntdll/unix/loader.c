@@ -124,22 +124,14 @@ SYSTEM_DLL_INIT_BLOCK *pLdrSystemDllInitBlock = NULL;
 static void * const syscalls[] =
 {
 #define SYSCALL_ENTRY(id,name,args) name,
-#ifdef _WIN64
-    ALL_SYSCALLS64
-#else
-    ALL_SYSCALLS32
-#endif
+    ALL_SYSCALLS
 #undef SYSCALL_ENTRY
 };
 
 static BYTE syscall_args[ARRAY_SIZE(syscalls)] =
 {
 #define SYSCALL_ENTRY(id,name,args) args,
-#ifdef _WIN64
-    ALL_SYSCALLS64
-#else
-    ALL_SYSCALLS32
-#endif
+    ALL_SYSCALLS
 #undef SYSCALL_ENTRY
 };
 
@@ -645,6 +637,8 @@ NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info 
         if (!env) return STATUS_NO_MEMORY;
         strcpy( env, "LD_PRELOAD=" );
         strcat( env, ld_preload );
+
+        TRACE("HACK: Unsetting LD_PRELOAD for explorer.exe\n");
 
         tmp = env + 11;
         do
@@ -2215,6 +2209,7 @@ static ULONG_PTR get_image_address(void)
     return 0;
 }
 
+BOOL disable_sfn;
 BOOL ac_odyssey;
 BOOL fsync_simulate_sched_quantum;
 BOOL alert_simulate_sched_quantum;
@@ -2236,6 +2231,12 @@ static void hacks_init(void)
         ram_reporting_bias = atoll(env_str) * 1024 * 1024;
         ERR( "HACK: ram_reporting_bias %lldMB.\n", ram_reporting_bias / (1024 * 1024) );
     }
+
+    env_str = getenv("WINE_DISABLE_SFN");
+    if (env_str)
+        disable_sfn = !!atoi(env_str);
+    else if (main_argc > 1 && (strstr(main_argv[1], "Yakuza5.exe") ))
+        disable_sfn = TRUE;
 
     env_str = getenv("WINE_SIMULATE_ASYNC_READ");
     if (env_str)
@@ -2350,13 +2351,6 @@ static void hacks_init(void)
     {
         ERR("HACK: setting WINE_ENABLE_GST_LIVE_LATENCY.\n");
         setenv("WINE_ENABLE_GST_LIVE_LATENCY", "1", 0);
-    }
-
-    if (sgi && !strcmp(sgi, "2379390"))
-    {
-        ERR("HACK: setting vk_x11_override_min_image_count, vk_x11_strict_image_count.\n");
-        setenv("vk_x11_override_min_image_count", "2", 0);
-        setenv("vk_x11_strict_image_count", "true", 0);
     }
 
 #ifndef __x86_64__

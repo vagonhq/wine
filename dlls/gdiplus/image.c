@@ -59,7 +59,12 @@ static const struct
     { &GUID_WICPixelFormat24bppBGR, PixelFormat24bppRGB, 0 },
     { &GUID_WICPixelFormat32bppBGR, PixelFormat32bppRGB, 0 },
     { &GUID_WICPixelFormat32bppBGRA, PixelFormat32bppARGB, 0 },
+    { &GUID_WICPixelFormat32bppCMYK, PixelFormat32bppCMYK, 0 },
+    { &GUID_WICPixelFormat32bppGrayFloat, PixelFormat32bppARGB, 0 },
     { &GUID_WICPixelFormat32bppPBGRA, PixelFormat32bppPARGB, 0 },
+    { &GUID_WICPixelFormat48bppRGB, PixelFormat48bppRGB, 0 },
+    { &GUID_WICPixelFormat64bppCMYK, PixelFormat48bppRGB, 0 },
+    { &GUID_WICPixelFormat64bppRGBA, PixelFormat48bppRGB, 0 },
     { NULL }
 };
 
@@ -5209,7 +5214,7 @@ static const struct image_codec codecs[NUM_CODECS] = {
     {
         { /* ICO */
             /* Clsid */              { 0x557cf407, 0x1a04, 0x11d3, { 0x9a, 0x73, 0x0, 0x0, 0xf8, 0x1e, 0xf3, 0x2e } },
-            /* FormatID */           { 0xb96b3cabU, 0x0728U, 0x11d3U, {0x9d, 0x7b, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e} },
+            /* FormatID */           { 0xb96b3cb5U, 0x0728U, 0x11d3U, {0x9d, 0x7b, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e} },
             /* CodecName */          ico_codecname,
             /* DllName */            NULL,
             /* FormatDescription */  ico_format,

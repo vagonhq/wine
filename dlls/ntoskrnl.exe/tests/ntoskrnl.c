@@ -1456,6 +1456,9 @@ static void test_pnp_devices(void)
     static const WCHAR expect_device_bus_desc_w[] = L"WineTestDevice";
     static const WCHAR expect_compat_id_w[] = L"winetest_compat\0winetest_compat_1\0";
     static const WCHAR expect_container_id_w[] = L"{12345678-1234-1234-1234-123456789123}";
+    static const char foobar[] = "foobar";
+    static const char foo[] = "foo";
+    static const char bar[] = "bar";
 
     char buffer[200];
     WCHAR buffer_w[200];
@@ -1482,6 +1485,8 @@ static void test_pnp_devices(void)
     IO_STATUS_BLOCK io;
     HDEVINFO set;
     HWND window;
+    LSTATUS status;
+    HKEY key;
     BOOL ret;
     int id;
 
@@ -1514,6 +1519,13 @@ static void test_pnp_devices(void)
     ok(ret, "failed to get interface path, error %#lx\n", GetLastError());
     ok(!strcmp(iface_detail->DevicePath, "\\\\?\\root#winetest#0#{deadbeef-29ef-4538-a5fd-b69573a362c0}"),
             "wrong path %s\n", debugstr_a(iface_detail->DevicePath));
+
+    /* Create a device parameter for testing IoOpenDeviceRegistryKey */
+    key = SetupDiCreateDevRegKeyA(set, &device, DICS_FLAG_GLOBAL, 0, DIREG_DEV, NULL, NULL);
+    ok(key != INVALID_HANDLE_VALUE, "failed to create a hardware parameters key, got error %#lx\n", GetLastError());
+    status = RegSetValueExA(key, foobar, 0, REG_SZ, (const BYTE *)foo, sizeof(foo));
+    ok(status == ERROR_SUCCESS, "failed to save a device parameter, got error %lu\n", status);
+    RegCloseKey(key);
 
     SetupDiDestroyDeviceInfoList(set);
 
@@ -1752,6 +1764,13 @@ static void test_pnp_devices(void)
     ok(!strcmp(iface_detail->DevicePath, "\\\\?\\wine#test#1#{deadbeef-29ef-4538-a5fd-b69573a362c2}"),
             "wrong path %s\n", debugstr_a(iface_detail->DevicePath));
 
+    /* Create a device parameter for testing IoOpenDeviceRegistryKey */
+    key = SetupDiCreateDevRegKeyA(set, &device, DICS_FLAG_GLOBAL, 0, DIREG_DEV, NULL, NULL);
+    ok(key != INVALID_HANDLE_VALUE, "failed to create a hardware parameters key, got error %#lx\n", GetLastError());
+    status = RegSetValueExA(key, foobar, 0, REG_SZ, (const BYTE *)bar, sizeof(bar));
+    ok(status == ERROR_SUCCESS, "failed to save a device parameter, got error %lu\n", status);
+    RegCloseKey(key);
+
     SetupDiDestroyDeviceInfoList(set);
 
     RtlInitUnicodeString(&string, L"\\Device\\winetest_pnp_1");
@@ -1764,6 +1783,9 @@ static void test_pnp_devices(void)
     ok(ret, "got error %lu\n", GetLastError());
     ok(id == 1, "got id %d\n", id);
     ok(size == sizeof(id), "got size %lu\n", size);
+
+    ret = DeviceIoControl(child, IOCTL_WINETEST_CHILD_MAIN, NULL, 0, NULL, 0, &size, NULL);
+    ok(ret, "got error %lu\n", GetLastError());
 
     CloseHandle(child);
 

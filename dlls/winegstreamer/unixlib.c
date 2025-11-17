@@ -267,7 +267,7 @@ NTSTATUS wg_init_gstreamer(void *arg)
     char *args[] = {arg0, arg1, NULL};
     int argc = ARRAY_SIZE(args) - 1;
     char **argv = args;
-    const char *e;
+    const char *e, *env;
     GError *err;
     DWORD_PTR process_mask;
 
@@ -278,7 +278,6 @@ NTSTATUS wg_init_gstreamer(void *arg)
     if (params->err_on)
         setenv("GST_DEBUG", "1", FALSE);
     setenv("GST_DEBUG_NO_COLOR", "1", FALSE);
-    setenv("GST_GL_WINDOW", "x11", 1);
 
     /* GStreamer installs a temporary SEGV handler when it loads plugins
      * to initialize its registry calling exit(-1) when any fault is caught.
@@ -322,7 +321,12 @@ NTSTATUS wg_init_gstreamer(void *arg)
     GST_INFO("GStreamer library version %s; wine built with %d.%d.%d.",
             gst_version_string(), GST_VERSION_MAJOR, GST_VERSION_MINOR, GST_VERSION_MICRO);
 
-    if (!(gl_display = gst_gl_display_new()))
+    if ((e = getenv("GST_GL_DISPLAY")) && strlen(e) > 0)
+        gl_display = gst_gl_display_new();
+    else
+        gl_display = gst_gl_display_new_with_type(GST_GL_DISPLAY_TYPE_EGL_SURFACELESS);
+
+    if (!gl_display)
         GST_ERROR("Failed to create OpenGL display");
     else
     {
@@ -344,11 +348,15 @@ NTSTATUS wg_init_gstreamer(void *arg)
         }
     }
 
-    if (!media_converter_init())
+    env = getenv("PROTON_ENABLE_MEDIACONV");
+
+    /*  don't enable media converter by default since we enable all codecs */
+    if (env && !strcmp(env, "1") && !media_converter_init())
     {
         GST_ERROR("Failed to init media converter.");
         return STATUS_UNSUCCESSFUL;
     }
+
 
     if (!GST_ELEMENT_REGISTER(winegstreamerstepper, NULL))
         GST_ERROR("Failed to register the stepper element");

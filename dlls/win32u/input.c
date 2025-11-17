@@ -30,6 +30,8 @@
 #pragma makedep unix
 #endif
 
+#include <sys/prctl.h>
+#include <string.h>
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
 #include "win32u_private.h"
@@ -503,12 +505,13 @@ static WORD kbd_tables_wchar_to_vkey( const KBDTABLES *tables, WCHAR wch )
     return wch >= 0x0080 ? -1 : 0;
 }
 
-static WCHAR kbd_tables_vkey_to_wchar( const KBDTABLES *tables, UINT vkey, const BYTE *state )
+static WCHAR kbd_tables_vkey_to_wchar( const KBDTABLES *tables, UINT vkey, const BYTE *state, BOOL *is_dead )
 {
     UINT mod, caps_mod, alt, ctrl, caps;
     const VK_TO_WCHAR_TABLE *table;
     const VK_TO_WCHARS1 *entry;
 
+    *is_dead = FALSE;
     alt = state[VK_MENU] & 0x80;
     ctrl = state[VK_CONTROL] & 0x80;
     caps = state[VK_CAPITAL] & 1;
@@ -535,8 +538,9 @@ static WCHAR kbd_tables_vkey_to_wchar( const KBDTABLES *tables, UINT vkey, const
              * The entry corresponds to the mapping when Caps Lock is on, and a second entry follows it
              * with the mapping when Caps Lock is off.
              */
-            if ((entry->Attributes & SGCAPS) && !caps) entry = NEXT_ENTRY(table, entry);
-            if ((entry->Attributes & CAPLOK) && table->nModifications > caps_mod) return entry->wch[caps_mod];
+            if (!caps) while (entry->Attributes & SGCAPS) entry = NEXT_ENTRY(table, entry);
+            if ((entry->Attributes & CAPLOK) && table->nModifications > caps_mod) mod = caps_mod;
+            if ((*is_dead = (entry->wch[mod] == WCH_DEAD))) entry = NEXT_ENTRY(table, entry);
             return entry->wch[mod];
         }
     }
@@ -569,8 +573,27 @@ HWND WINAPI NtUserGetForegroundWindow(void)
 HWND get_active_window(void)
 {
     GUITHREADINFO info;
+    HWND retValueWindow;
+    static HWND prev = 0;
+    const char *sgi;
+    static int is_DragonAgeInquis = -1;
+
     info.cbSize = sizeof(info);
-    return NtUserGetGUIThreadInfo( GetCurrentThreadId(), &info ) ? info.hwndActive : 0;
+    retValueWindow =  NtUserGetGUIThreadInfo( GetCurrentThreadId(), &info ) ? info.hwndActive : 0;
+
+    if (is_DragonAgeInquis)
+    {
+        if ((is_DragonAgeInquis == 1) ||
+            (is_DragonAgeInquis = ((sgi = getenv("SteamGameId")) && !strcmp(sgi, "1222690"))))
+        {
+            if (retValueWindow == 0 && prev != 0)
+                NtUserAttachThreadInput(0, 0, 1);
+            else
+                prev = retValueWindow;
+        }
+    }
+
+    return retValueWindow;
 }
 
 /* see GetCapture */
@@ -595,6 +618,41 @@ HWND get_focus(void)
 BOOL WINAPI NtUserAttachThreadInput( DWORD from, DWORD to, BOOL attach )
 {
     BOOL ret;
+    static int visited = 0;
+    static DWORD fromThreadForHack = 0;
+    static DWORD toThreadForHack = 0;
+    static char processNameForHack[16];
+    static const char* DAIprocessName = "DragonAgeInquis";
+    static const char* DAIGameLoopName = "GameLoop";
+    static int is_DragonAgeInquis = -1;
+    const char *sgi;
+
+    if (is_DragonAgeInquis)
+    {
+        if ((is_DragonAgeInquis == 1) ||
+            (is_DragonAgeInquis = ((sgi = getenv("SteamGameId")) && !strcmp(sgi, "1222690"))))
+        {
+            prctl(PR_GET_NAME, processNameForHack);
+            TRACE("Process Name: %s\n", processNameForHack);
+            if (strncmp(DAIprocessName, processNameForHack, 15) == 0 || strncmp(DAIGameLoopName, processNameForHack, 8) == 0)
+            {
+                if (!visited)
+                {
+                    TRACE("First Visit Process Name: %s\n", processNameForHack);
+                    fromThreadForHack = from;
+                    toThreadForHack = to;
+                    visited = 1;
+                }
+
+                if (from == 0 && to == 0 && visited)
+                {
+                    TRACE("00 Process Name: %s\n", processNameForHack);
+                    from = fromThreadForHack;
+                    to = toThreadForHack;
+                }
+            }
+        }
+    }
 
     SERVER_START_REQ( attach_thread_input )
     {
@@ -1258,7 +1316,11 @@ INT WINAPI NtUserGetKeyNameText( LONG lparam, WCHAR *buffer, INT size )
     INT code = ((lparam >> 16) & 0x1ff), vkey, len;
     HKL layout = NtUserGetKeyboardLayout( 0 );
     const KBDTABLES *kbd_tables;
+    BYTE state[0x100] = {0};
     VSC_LPWSTR *key_name;
+    USHORT vsc2vk[0x300];
+    BOOL is_dead;
+    WCHAR wch;
 
     TRACE_(keyboard)( "lparam %#x, buffer %p, size %d.\n", (int)lparam, buffer, size );
 
@@ -1267,10 +1329,10 @@ INT WINAPI NtUserGetKeyNameText( LONG lparam, WCHAR *buffer, INT size )
 
     if (!(kbd_tables = user_driver->pKbdLayerDescriptor( layout ))) kbd_tables = &kbdus_tables;
 
+    kbd_tables_init_vsc2vk( kbd_tables, vsc2vk );
+
     if (lparam & 0x2000000)
     {
-        USHORT vsc2vk[0x300];
-        kbd_tables_init_vsc2vk( kbd_tables, vsc2vk );
         switch ((vkey = vsc2vk[code] & 0xff))
         {
         case VK_RSHIFT:
@@ -1286,7 +1348,18 @@ INT WINAPI NtUserGetKeyNameText( LONG lparam, WCHAR *buffer, INT size )
     else key_name = kbd_tables->pKeyNamesExt;
     while (key_name->vsc && key_name->vsc != (BYTE)code) key_name++;
 
-    if (key_name->vsc == (BYTE)code && key_name->pwsz)
+    wch = kbd_tables_vkey_to_wchar( kbd_tables, vsc2vk[code], state, &is_dead );
+    if (wch != WCH_NONE && is_dead)
+    {
+        WCHAR **names = kbd_tables->pKeyNamesDead;
+        while (names[0] && *names[0] != wch) names += 2;
+        if (names[0])
+        {
+            len = min( size - 1, wcslen( names[1] ));
+            memcpy( buffer, names[1], len * sizeof(WCHAR) );
+        }
+    }
+    else if (key_name->vsc == (BYTE)code && key_name->pwsz)
     {
         len = min( size - 1, wcslen( key_name->pwsz ) );
         memcpy( buffer, key_name->pwsz, len * sizeof(WCHAR) );
@@ -1296,7 +1369,7 @@ INT WINAPI NtUserGetKeyNameText( LONG lparam, WCHAR *buffer, INT size )
         HKL hkl = NtUserGetKeyboardLayout( 0 );
         vkey = NtUserMapVirtualKeyEx( code & 0xff, MAPVK_VSC_TO_VK, hkl );
         buffer[0] = NtUserMapVirtualKeyEx( vkey, MAPVK_VK_TO_CHAR, hkl );
-        len = 1;
+        len = buffer[0] ? 1 : 0;
     }
     buffer[len] = 0;
 
@@ -1312,7 +1385,10 @@ INT WINAPI NtUserGetKeyNameText( LONG lparam, WCHAR *buffer, INT size )
 INT WINAPI NtUserToUnicodeEx( UINT virt, UINT scan, const BYTE *state,
                               WCHAR *str, int size, UINT flags, HKL layout )
 {
+    struct user_thread_info *thread = get_user_thread_info();
+    WCHAR deadkey = thread->kbd_deadkey;
     const KBDTABLES *kbd_tables;
+    BOOL is_dead = FALSE;
     INT len;
 
     TRACE_(keyboard)( "virt %#x, scan %#x, state %p, str %p, size %d, flags %#x, layout %p.\n",
@@ -1323,16 +1399,34 @@ INT WINAPI NtUserToUnicodeEx( UINT virt, UINT scan, const BYTE *state,
 
     if (!(kbd_tables = user_driver->pKbdLayerDescriptor( layout ))) kbd_tables = &kbdus_tables;
     if (scan & 0x8000) str[0] = 0; /* key up */
-    else str[0] = kbd_tables_vkey_to_wchar( kbd_tables, virt, state );
+    else
+    {
+        str[0] = kbd_tables_vkey_to_wchar( kbd_tables, virt, state, &is_dead );
+        if (str[0] != WCH_NONE) thread->kbd_deadkey = is_dead ? str[0] : 0;
+    }
     if (size > 1) str[1] = 0;
 
     if (str[0] != WCH_NONE) len = 1;
     else str[0] = len = 0;
 
+    /* TODO: Implement deadkey pressed twice */
+    if (deadkey && !is_dead && len && str[0])
+    {
+        DEADKEY *key = kbd_tables->pDeadKey;
+        while (key->dwBoth && key->dwBoth != MAKELONG(str[0], deadkey)) key++;
+
+        if (key->dwBoth) str[0] = key->wchComposed;
+        else
+        {
+            str[0] = 0;
+            len = 0;
+        }
+    }
+
     if (kbd_tables != &kbdus_tables) user_driver->pReleaseKbdTables( kbd_tables );
 
-    TRACE_(keyboard)( "ret %d, str %s.\n", len, debugstr_wn(str, len) );
-    return len;
+    TRACE_(keyboard)( "ret %d, str %s.\n", is_dead ? -len : len, debugstr_wn(str, len) );
+    return is_dead ? -len : len;
 }
 
 /**********************************************************************
@@ -1406,11 +1500,7 @@ HKL WINAPI NtUserActivateKeyboardLayout( HKL layout, UINT flags )
  */
 UINT WINAPI NtUserGetKeyboardLayoutList( INT size, HKL *layouts )
 {
-    char buffer[4096];
-    KEY_NODE_INFORMATION *key_info = (KEY_NODE_INFORMATION *)buffer;
-    KEY_VALUE_PARTIAL_INFORMATION *value_info = (KEY_VALUE_PARTIAL_INFORMATION *)buffer;
-    DWORD count, tmp, i = 0;
-    HKEY hkey, subkey;
+    DWORD count;
     HKL layout;
 
     TRACE_(keyboard)( "size %d, layouts %p.\n", size, layouts );
@@ -1424,33 +1514,6 @@ UINT WINAPI NtUserGetKeyboardLayoutList( INT size, HKL *layouts )
     if (size && layouts)
     {
         layouts[count - 1] = layout;
-        if (count == size) return count;
-    }
-
-    if ((hkey = reg_open_key( NULL, keyboard_layouts_keyW, sizeof(keyboard_layouts_keyW) )))
-    {
-        while (!NtEnumerateKey( hkey, i++, KeyNodeInformation, key_info,
-                                sizeof(buffer) - sizeof(WCHAR), &tmp ))
-        {
-            if (!(subkey = reg_open_key( hkey, key_info->Name, key_info->NameLength ))) continue;
-            key_info->Name[key_info->NameLength / sizeof(WCHAR)] = 0;
-            tmp = wcstoul( key_info->Name, NULL, 16 );
-            if (query_reg_ascii_value( subkey, "Layout Id", value_info, sizeof(buffer) ) &&
-                value_info->Type == REG_SZ)
-                tmp = 0xf000 | (wcstoul( (const WCHAR *)value_info->Data, NULL, 16 ) & 0xfff);
-            NtClose( subkey );
-
-            tmp = MAKELONG( LOWORD( layout ), LOWORD( tmp ) );
-            if (layout == UlongToHandle( tmp )) continue;
-
-            count++;
-            if (size && layouts)
-            {
-                layouts[count - 1] = UlongToHandle( tmp );
-                if (count == size) break;
-            }
-        }
-        NtClose( hkey );
     }
 
     return count;

@@ -3105,6 +3105,7 @@ C_ASSERT( sizeof(struct process_info) <= sizeof(SYSTEM_PROCESS_INFORMATION) );
 
         proc_len = sizeof(*nt_process) + server_process->thread_count * thread_info_size
                      + (name_len + 1) * sizeof(WCHAR);
+        proc_len = (proc_len + 7) & ~(ULONG_PTR)7;
         *len += proc_len;
 
         if (*len <= size)
@@ -3405,6 +3406,8 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
 
         ULONG i;
         RTL_PROCESS_MODULES *smi = info;
+
+        FIXME("semi-stub!\n");
 
         len = offsetof( RTL_PROCESS_MODULES, Modules[ARRAY_SIZE(fake_modules)] );
         if (len <= size)
@@ -3754,6 +3757,8 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
 
         ULONG i;
         RTL_PROCESS_MODULE_INFORMATION_EX *module_info = info;
+
+        FIXME("semi-stub!\n");
 
         len = sizeof(*module_info) * ARRAY_SIZE(fake_modules) + sizeof(module_info->NextOffset);
         if (len <= size)
@@ -4436,6 +4441,19 @@ NTSTATUS WINAPI NtPowerInformation( POWER_INFORMATION_LEVEL level, void *input, 
         PowerCaps->RtcWake = PowerSystemSleeping1;
         PowerCaps->MinDeviceWakeState = PowerSystemUnspecified;
         PowerCaps->DefaultLowLatencyWake = PowerSystemUnspecified;
+        return STATUS_SUCCESS;
+    }
+
+    case SystemPowerInformation:
+    {
+        static int once;
+        SYSTEM_POWER_INFORMATION *info = output;
+
+        if (!once++) FIXME("semi-stub: SystemPowerInformation\n");
+        if (out_size < sizeof(SYSTEM_POWER_INFORMATION)) return STATUS_BUFFER_TOO_SMALL;
+        memset(info, 0, sizeof(SYSTEM_POWER_INFORMATION));
+        info->MaxIdlenessAllowed = 100;
+        info->TimeRemaining = 600;
         return STATUS_SUCCESS;
     }
 

@@ -39,6 +39,9 @@
 #ifdef HAVE_SYS_SYSINFO_H
 # include <sys/sysinfo.h>
 #endif
+#ifdef HAVE_SYS_SYSCALL_H
+# include <sys/syscall.h>
+#endif
 #ifdef HAVE_SYS_SYSCTL_H
 # include <sys/sysctl.h>
 #endif
@@ -68,6 +71,9 @@
 #if defined(__APPLE__)
 # include <mach/mach_init.h>
 # include <mach/mach_vm.h>
+# include <mach/task.h>
+# include <mach/thread_state.h>
+# include <mach/vm_map.h>
 #endif
 
 #include <sys/uio.h>
@@ -1021,7 +1027,7 @@ static void load_steam_overlay(const char *unix_lib_path)
     unsigned int len;
     void *handle;
 
-    if (!strstr(unix_lib_path, "winex11.so")) return;
+    if (!strstr(unix_lib_path, "winex11.so") && !strstr(unix_lib_path, "winewayland.so")) return;
     if (getenv("LD_PRELOAD") || !(preload = getenv("WINE_LD_PRELOAD"))) return;
 
     p = preload;
@@ -2484,28 +2490,6 @@ static void clear_native_views(void)
     }
 }
 
-static void fixup_effective_user_space_limit( const void **effective_user_space_limit )
-{
-#ifdef _WIN64
-    static int cached = -1;
-
-    if (cached == -1)
-    {
-        const char *e = getenv( "PROTON_LIMIT_ADDRESS_SPACE" );
-        const char *sgi = getenv( "SteamGameId" );
-        if (e) cached = e[0] != '0';
-        else cached = sgi &&
-            (
-                !strcmp( sgi, "3092660" )
-                || !strcmp( sgi, "3681810" )
-            );
-        if (cached) FIXME( "fixing up effective user space limit.\n" );
-    }
-    if (cached)
-        *effective_user_space_limit = min( *effective_user_space_limit, (void *)0x700000000000 );
-#endif
-}
-
 /***********************************************************************
  *           map_view
  *
@@ -2521,8 +2505,6 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
     NTSTATUS status;
     const void *effective_user_space_limit = !is_win64 && wine_allocs_2g_limit ?
         (void *)0x7fff0000 : min( user_space_limit, host_addr_space_limit);
-
-    fixup_effective_user_space_limit( &effective_user_space_limit );
 
     if (alloc_type & MEM_REPLACE_PLACEHOLDER)
     {
@@ -3609,10 +3591,11 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
     status = map_image_into_view( view, filename, unix_fd, image_info, machine, shared_fd, needs_close );
     if (status == STATUS_SUCCESS)
     {
+        image_info->base = wine_server_client_ptr( view->base );
         SERVER_START_REQ( map_image_view )
         {
             req->mapping = wine_server_obj_handle( mapping );
-            req->base    = wine_server_client_ptr( view->base );
+            req->base    = image_info->base;
             req->size    = size;
             req->entry   = image_info->entry_point;
             req->machine = image_info->machine;
@@ -3838,7 +3821,7 @@ void virtual_init(void)
         kernel_writewatch_init();
 
     if (use_kernel_writewatch)
-        WARN( "using kernel write watches, use_kernel_writewatch %d.\n", use_kernel_writewatch );
+        TRACE( "using kernel write watches, use_kernel_writewatch %d.\n", use_kernel_writewatch );
 
     if (preload_info && *preload_info)
         for (i = 0; (*preload_info)[i].size; i++)
@@ -4017,8 +4000,6 @@ NTSTATUS virtual_map_module( HANDLE mapping, void **module, SIZE_T *size, SECTIO
         status = virtual_map_image( mapping, module, size, shared_file, limit_low, limit_high, 0,
                                     machine, image_info, filename, FALSE );
         virtual_fill_image_information( image_info, info );
-        if (status == STATUS_IMAGE_NOT_AT_BASE)
-            info->TransferAddress = (char *)*module + image_info->entry_point;
     }
     if (shared_file) NtClose( shared_file );
     free( image_info );
@@ -4199,6 +4180,7 @@ static TEB *init_teb( void *ptr, BOOL is_wow )
     thread_data->reply_fd   = -1;
     thread_data->wait_fd[0] = -1;
     thread_data->wait_fd[1] = -1;
+    thread_data->linux_alert_obj = -1;
     list_add_head( &teb_list, &thread_data->entry );
     return teb;
 }
@@ -5658,7 +5640,7 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
     if ((view = find_view( base, size )))
     {
         /* Make sure all the pages are committed */
-        if (get_committed_size( view, base, ~(size_t)0, &vprot, VPROT_COMMITTED ) >= size && (vprot & VPROT_COMMITTED))
+        if (get_committed_size( view, base, size, &vprot, VPROT_COMMITTED ) >= size && (vprot & VPROT_COMMITTED))
         {
             old = get_win32_prot( vprot, view->protect );
             status = set_protection( view, base, size, new_prot );
@@ -7216,6 +7198,77 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
 }
 
 
+#ifdef __APPLE__
+
+static kern_return_t (*p_thread_get_register_pointer_values)( thread_t, uintptr_t*, size_t*, uintptr_t* );
+static pthread_once_t tgrpvs_init_once = PTHREAD_ONCE_INIT;
+
+static void tgrpvs_init(void)
+{
+    p_thread_get_register_pointer_values = dlsym( RTLD_DEFAULT, "thread_get_register_pointer_values" );
+    if (!p_thread_get_register_pointer_values)
+        FIXME( "thread_get_register_pointer_values not supported for NtFlushProcessWriteBuffers\n" );
+}
+
+/**********************************************************************
+ *           NtFlushProcessWriteBuffers  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
+{
+    /* Taken from https://github.com/dotnet/runtime/blob/7be37908e5a1cbb83b1062768c1649827eeaceaa/src/coreclr/pal/src/thread/process.cpp#L2799 */
+    mach_msg_type_number_t count, i;
+    thread_act_array_t threads;
+
+    pthread_once( &tgrpvs_init_once, tgrpvs_init );
+    if (!p_thread_get_register_pointer_values) return STATUS_SUCCESS;
+
+    /* Get references to all threads of this process */
+    if (task_threads( mach_task_self(), &threads, &count )) return STATUS_SUCCESS;
+
+    for (i = 0; i < count; i++)
+    {
+        uintptr_t reg_values[128];
+        size_t reg_count = ARRAY_SIZE( reg_values );
+        uintptr_t sp;
+
+        /* Request the thread's register pointer values to force the thread to go through a memory barrier */
+        p_thread_get_register_pointer_values( threads[i], &sp, &reg_count, reg_values );
+        mach_port_deallocate( mach_task_self(), threads[i] );
+    }
+    vm_deallocate( mach_task_self(), (vm_address_t)threads, count * sizeof(threads[0]) );
+    return STATUS_SUCCESS;
+}
+
+#elif defined(__linux__) && defined(__NR_membarrier)
+
+#define MEMBARRIER_CMD_PRIVATE_EXPEDITED            0x08
+#define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED   0x10
+
+static pthread_once_t membarrier_init_once = PTHREAD_ONCE_INIT;
+
+static int membarrier( int cmd, unsigned int flags, int cpu_id )
+{
+    return syscall( __NR_membarrier, cmd, flags, cpu_id );
+}
+
+static void membarrier_init(void)
+{
+    if (membarrier( MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0 ))
+        FIXME( "membarrier not supported for NtFlushProcessWriteBuffers\n" );
+}
+
+/**********************************************************************
+ *           NtFlushProcessWriteBuffers  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
+{
+    pthread_once( &membarrier_init_once, membarrier_init );
+    membarrier( MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0 );
+    return STATUS_SUCCESS;
+}
+
+#else /* __linux__ */
+
 /**********************************************************************
  *           NtFlushProcessWriteBuffers  (NTDLL.@)
  */
@@ -7226,6 +7279,7 @@ NTSTATUS WINAPI NtFlushProcessWriteBuffers(void)
     return STATUS_SUCCESS;
 }
 
+#endif
 
 /**********************************************************************
  *           NtCreatePagingFile  (NTDLL.@)

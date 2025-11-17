@@ -419,6 +419,25 @@ static BOOL thickframe_managed( DWORD style )
     return cached;
 }
 
+static BOOL is_actual_window_rect_mapped(const struct x11drv_win_data *data)
+{
+    XWindowAttributes attr;
+    Window child;
+    RECT rect;
+    POINT pt;
+    int x, y;
+
+    /* Query the X server for the actual position of the window,
+       as some WMs tend to mess with it, so we need to make sure
+       we aren't unmapping the window wrongly with a bogus rect */
+    XTranslateCoordinates(data->display, data->whole_window, root_window, 0, 0, &x, &y, &child);
+    XGetWindowAttributes(data->display, data->whole_window, &attr);
+
+    pt = root_to_virtual_screen(x - attr.x, y - attr.y);
+    SetRect(&rect, pt.x, pt.y, pt.x + attr.width, pt.y + attr.height);
+    return is_window_rect_mapped(&rect);
+}
+
 
 /***********************************************************************
  *		is_window_managed
@@ -502,7 +521,7 @@ static unsigned long get_mwm_decorations_for_style( DWORD style, DWORD ex_style 
     if (X11DRV_HasWindowManager( "Mutter" )) return 0;
 
     if (ex_style & WS_EX_TOOLWINDOW) return 0;
-    if (ex_style & WS_EX_LAYERED) return 0;
+    if ((ex_style & (WS_EX_LAYERED | WS_EX_COMPOSITED)) == WS_EX_LAYERED) return 0;
 
     if ((style & WS_CAPTION) == WS_CAPTION)
     {
@@ -510,11 +529,7 @@ static unsigned long get_mwm_decorations_for_style( DWORD style, DWORD ex_style 
         if (style & WS_SYSMENU) ret |= MWM_DECOR_MENU;
         if (style & WS_MINIMIZEBOX) ret |= MWM_DECOR_MINIMIZE;
         if (style & WS_MAXIMIZEBOX) ret |= MWM_DECOR_MAXIMIZE;
-        if (style & WS_THICKFRAME) ret |= MWM_DECOR_RESIZEH;
     }
-    if (ex_style & WS_EX_DLGMODALFRAME) ret |= MWM_DECOR_BORDER;
-    else if (style & WS_THICKFRAME) return ret;
-    else if ((style & (WS_DLGFRAME|WS_BORDER)) == WS_DLGFRAME) ret |= MWM_DECOR_BORDER;
     return ret;
 }
 
@@ -1850,9 +1865,10 @@ static UINT window_update_client_state( struct x11drv_win_data *data )
     if (data->current_state.net_wm_state & (1 << NET_WM_STATE_MAXIMIZED)) new_style |= WS_MAXIMIZE;
 
     /* KWin sometimes combines NET_WM_STATE_FULLSCREEN with NET_WM_STATE_MAXIMIZED, but sometimes doesn't.
-     * Don't feed back the maximized state to the Win32 side as it confuses many applications.
+     * Don't feeding back the maximized state to the Win32 side when windows are fullscreen.
      */
-    if (X11DRV_HasWindowManager( "KWin" )) new_style = (new_style & ~WS_MAXIMIZE) | (old_style & WS_MAXIMIZE);
+    if (X11DRV_HasWindowManager( "KWin" ) && data->current_state.net_wm_state & (1 << NET_WM_STATE_FULLSCREEN))
+        new_style = (new_style & ~WS_MAXIMIZE) | (old_style & WS_MAXIMIZE);
 
     if ((old_style & WS_MINIMIZE) && !(new_style & WS_MINIMIZE))
     {
@@ -1917,9 +1933,10 @@ static UINT window_update_client_config( struct x11drv_win_data *data )
     if (data->current_state.net_wm_state & (1 << NET_WM_STATE_MAXIMIZED)) new_style |= WS_MAXIMIZE;
 
     /* KWin sometimes combines NET_WM_STATE_FULLSCREEN with NET_WM_STATE_MAXIMIZED, but sometimes doesn't.
-     * Don't feed back the maximized state to the Win32 side as it confuses many applications.
+     * Don't feeding back the maximized state to the Win32 side when windows are fullscreen.
      */
-    if (X11DRV_HasWindowManager( "KWin" )) new_style = (new_style & ~WS_MAXIMIZE) | (old_style & WS_MAXIMIZE);
+    if (X11DRV_HasWindowManager( "KWin" ) && data->current_state.net_wm_state & (1 << NET_WM_STATE_FULLSCREEN))
+        new_style = (new_style & ~WS_MAXIMIZE) | (old_style & WS_MAXIMIZE);
 
     if ((old_style & WS_CAPTION) == WS_CAPTION || !data->is_fullscreen)
     {
@@ -3519,7 +3536,8 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     if (old_style & WS_VISIBLE)
     {
         if (((swp_flags & SWP_HIDEWINDOW) && !(new_style & WS_VISIBLE)) ||
-            (!(new_style & WS_MINIMIZE) && !is_window_rect_mapped( &new_rects->window ) && is_window_rect_mapped( &old_rects.window )))
+            (!(new_style & WS_MINIMIZE) && !is_window_rect_mapped( &new_rects->window ) && is_window_rect_mapped( &old_rects.window ) &
+            !is_actual_window_rect_mapped( data )))
         {
             unmap_window( hwnd );
             if (was_fullscreen) NtUserClipCursor( NULL );
@@ -3558,8 +3576,9 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
             BOOL needs_map = TRUE;
 
             /* layered windows are mapped only once their attributes are set */
-            if (NtUserGetWindowLongW( hwnd, GWL_EXSTYLE ) & WS_EX_LAYERED)
+            if ((NtUserGetWindowLongW( hwnd, GWL_EXSTYLE ) & (WS_EX_LAYERED | WS_EX_COMPOSITED)) == WS_EX_LAYERED)
                 needs_map = data->layered || IsRectEmpty( &new_rects->window );
+
             release_win_data( data );
             if (needs_icon) fetch_icon_data( hwnd, 0, 0 );
             if (needs_map) map_window( hwnd, new_style, activate );

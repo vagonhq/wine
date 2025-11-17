@@ -66,17 +66,43 @@ static void wine_vk_surface_destroy(struct wayland_client_surface *client)
     if (data) wayland_win_data_release(data);
 }
 
+static BOOL vulkan_opwr_disabled(void)
+{
+    static int disabled = -1;
+
+    if (disabled == -1)
+    {
+        const char *env = getenv("WINE_DISABLE_VULKAN_OPWR");
+        if (env && !strcmp(env, "1"))
+            disabled = 1;
+        else
+            disabled = 0;
+    }
+
+    return disabled;
+}
+
 static VkResult wayland_vulkan_surface_create(HWND hwnd, const struct vulkan_instance *instance, VkSurfaceKHR *surface, void **private)
 {
     VkResult res;
+    DWORD pid, tid;
     VkWaylandSurfaceCreateInfoKHR create_info_host;
     struct wayland_client_surface *client;
 
     TRACE("%p %p %p %p\n", hwnd, instance, surface, private);
 
-    if (!(client = get_client_surface(hwnd)))
+    if (!(client = wayland_client_surface_create(hwnd)))
     {
         ERR("Failed to create client surface for hwnd=%p\n", hwnd);
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+
+    tid = NtUserGetWindowThread(hwnd, &pid);
+    if (tid && pid != GetCurrentProcessId())
+    {
+        if (vulkan_opwr_disabled()) return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+        ERR("Cross process rendering is not supported!\n");
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
 
@@ -96,6 +122,7 @@ static VkResult wayland_vulkan_surface_create(HWND hwnd, const struct vulkan_ins
         return res;
     }
 
+    set_client_surface(hwnd, client);
     *private = client;
 
     TRACE("Created surface=0x%s, private=%p\n", wine_dbgstr_longlong(*surface), *private);
@@ -121,8 +148,10 @@ static void wayland_vulkan_surface_update(HWND hwnd, void *private)
 
 static void wayland_vulkan_surface_presented(HWND hwnd, void *private, VkResult result)
 {
+    struct wayland_client_surface *client = private;
     HWND toplevel = NtUserGetAncestor(hwnd, GA_ROOT);
     ensure_window_surface_contents(toplevel);
+    set_client_surface(hwnd, client);
 }
 
 static BOOL wayland_vulkan_surface_enable_fshack(HWND hwnd, void *private)

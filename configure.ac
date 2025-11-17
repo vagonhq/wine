@@ -1380,7 +1380,7 @@ then
                             [`test -n "$PKG_CONFIG" && $PKG_CONFIG --variable=wayland_scanner wayland-scanner 2>/dev/null`])],
               [WAYLAND_CLIENT_LIBS=""],[$WAYLAND_CLIENT_LIBS])])])
     WINE_PACKAGE_FLAGS(XKBCOMMON,[xkbcommon],,,,
-        [AC_CHECK_HEADERS([xkbcommon/xkbcommon.h])
+        [AC_CHECK_HEADERS([xkbcommon/xkbcommon.h, xkbcommon/xkbcommon-compose.h])
          AC_CHECK_LIB(xkbcommon,xkb_context_new,[:],[XKBCOMMON_LIBS=""],[$XKBCOMMON_LIBS])])
     WINE_PACKAGE_FLAGS(XKBREGISTRY,[xkbregistry],,,,
         [AC_CHECK_HEADERS([xkbcommon/xkbregistry.h])
@@ -2115,6 +2115,7 @@ AC_CHECK_FUNCS(\
         dladdr1 \
 	dlinfo \
 	epoll_create \
+	epoll_pwait2 \
 	fstatfs \
 	futimens \
 	futimes \
@@ -2465,6 +2466,7 @@ WINE_CONFIG_MAKEFILE(dlls/apphelp/tests)
 WINE_CONFIG_MAKEFILE(dlls/appwiz.cpl)
 WINE_CONFIG_MAKEFILE(dlls/appxdeploymentclient)
 WINE_CONFIG_MAKEFILE(dlls/atiadlxx)
+WINE_CONFIG_MAKEFILE(dlls/atidxx64)
 WINE_CONFIG_MAKEFILE(dlls/atl)
 WINE_CONFIG_MAKEFILE(dlls/atl/tests)
 WINE_CONFIG_MAKEFILE(dlls/atl100)
@@ -2523,6 +2525,7 @@ WINE_CONFIG_MAKEFILE(dlls/concrt140)
 WINE_CONFIG_MAKEFILE(dlls/concrt140/tests)
 WINE_CONFIG_MAKEFILE(dlls/connect)
 WINE_CONFIG_MAKEFILE(dlls/coremessaging)
+WINE_CONFIG_MAKEFILE(dlls/coremessaging/tests)
 WINE_CONFIG_MAKEFILE(dlls/credui)
 WINE_CONFIG_MAKEFILE(dlls/credui/tests)
 WINE_CONFIG_MAKEFILE(dlls/crtdll)
@@ -2531,6 +2534,7 @@ WINE_CONFIG_MAKEFILE(dlls/crypt32/tests)
 WINE_CONFIG_MAKEFILE(dlls/cryptdlg)
 WINE_CONFIG_MAKEFILE(dlls/cryptdll)
 WINE_CONFIG_MAKEFILE(dlls/cryptext)
+WINE_CONFIG_MAKEFILE(dlls/cryptext/tests)
 WINE_CONFIG_MAKEFILE(dlls/cryptnet)
 WINE_CONFIG_MAKEFILE(dlls/cryptnet/tests)
 WINE_CONFIG_MAKEFILE(dlls/cryptowinrt)
@@ -2713,6 +2717,8 @@ WINE_CONFIG_MAKEFILE(dlls/dxdiagn)
 WINE_CONFIG_MAKEFILE(dlls/dxdiagn/tests)
 WINE_CONFIG_MAKEFILE(dlls/dxgi)
 WINE_CONFIG_MAKEFILE(dlls/dxgi/tests)
+WINE_CONFIG_MAKEFILE(dlls/dxgkrnl.sys)
+WINE_CONFIG_MAKEFILE(dlls/dxgmms1.sys)
 WINE_CONFIG_MAKEFILE(dlls/dxtrans)
 WINE_CONFIG_MAKEFILE(dlls/dxva2)
 WINE_CONFIG_MAKEFILE(dlls/dxva2/tests)
@@ -2731,6 +2737,7 @@ WINE_CONFIG_MAKEFILE(dlls/fontsub)
 WINE_CONFIG_MAKEFILE(dlls/fusion)
 WINE_CONFIG_MAKEFILE(dlls/fusion/tests)
 WINE_CONFIG_MAKEFILE(dlls/fwpuclnt)
+WINE_CONFIG_MAKEFILE(dlls/gameinput)
 WINE_CONFIG_MAKEFILE(dlls/gameux)
 WINE_CONFIG_MAKEFILE(dlls/gameux/tests)
 WINE_CONFIG_MAKEFILE(dlls/gamingtcui)
@@ -3262,6 +3269,7 @@ WINE_CONFIG_MAKEFILE(dlls/wbemdisp)
 WINE_CONFIG_MAKEFILE(dlls/wbemdisp/tests)
 WINE_CONFIG_MAKEFILE(dlls/wbemprox)
 WINE_CONFIG_MAKEFILE(dlls/wbemprox/tests)
+WINE_CONFIG_MAKEFILE(dlls/wdfldr.sys)
 WINE_CONFIG_MAKEFILE(dlls/wdscore)
 WINE_CONFIG_MAKEFILE(dlls/webservices)
 WINE_CONFIG_MAKEFILE(dlls/webservices/tests)
@@ -3274,6 +3282,7 @@ WINE_CONFIG_MAKEFILE(dlls/wevtsvc)
 WINE_CONFIG_MAKEFILE(dlls/wiaservc)
 WINE_CONFIG_MAKEFILE(dlls/wiaservc/tests)
 WINE_CONFIG_MAKEFILE(dlls/wimgapi)
+WINE_CONFIG_MAKEFILE(dlls/win32k.sys)
 WINE_CONFIG_MAKEFILE(dlls/win32s16.dll16,enable_win16)
 WINE_CONFIG_MAKEFILE(dlls/win32u)
 WINE_CONFIG_MAKEFILE(dlls/win32u/tests)
@@ -3777,7 +3786,7 @@ dnl Rules for generated source files
 
 WINE_APPEND_RULE(
 [dlls/ntdll/unix/version.c: dummy
-	@version=\`(GIT_DIR=${wine_srcdir}.git git describe HEAD 2>/dev/null || echo \"wine-\$(PACKAGE_VERSION)\") | sed -n -e '\$\$s/\(.*\)/const char wine_build[[]] = \"\\1\";/p'\` && (echo \$\$version | cmp -s - \$[@]) || echo \$\$version >\$[@] || (rm -f \$[@] && exit 1)
+	@version=\`(GIT_DIR=${wine_srcdir}.git git describe HEAD 2>/dev/null || echo \"wine-\$(PACKAGE_VERSION)\") | sed -n -e '\$\$s/\(.*\)/const char wine_build[[]] = \"\\1 (Staging)\";/p'\` && (echo \$\$version | cmp -s - \$[@]) || echo \$\$version >\$[@] || (rm -f \$[@] && exit 1)
 programs/winetest/build.rc: dummy
 	@build=\"STRINGTABLE { 1 \\\"\`GIT_DIR=${wine_srcdir}.git git rev-parse HEAD 2>/dev/null\`\\\" }\" && (echo \$\$build | cmp -s - \$[@]) || echo \$\$build >\$[@] || (rm -f \$[@] && exit 1)
 programs/winetest/build.nfo:

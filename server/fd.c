@@ -158,6 +158,7 @@ struct fd
     unsigned int         comp_flags;  /* completion flags */
     int                  esync_fd;    /* esync file descriptor */
     unsigned int         fsync_idx;   /* fsync shm index */
+    int                  inproc_sync; /* in-process synchronization object */
 };
 
 static void fd_dump( struct object *obj, int verbose );
@@ -185,6 +186,7 @@ static const struct object_ops fd_ops =
     NULL,                     /* unlink_name */
     no_open_file,             /* open_file */
     no_kernel_obj_list,       /* get_kernel_obj_list */
+    no_get_inproc_sync,       /* get_inproc_sync */
     no_close_handle,          /* close_handle */
     fd_destroy                /* destroy */
 };
@@ -228,6 +230,7 @@ static const struct object_ops device_ops =
     NULL,                     /* unlink_name */
     no_open_file,             /* open_file */
     no_kernel_obj_list,       /* get_kernel_obj_list */
+    no_get_inproc_sync,       /* get_inproc_sync */
     no_close_handle,          /* close_handle */
     device_destroy            /* destroy */
 };
@@ -270,6 +273,7 @@ static const struct object_ops inode_ops =
     NULL,                     /* unlink_name */
     no_open_file,             /* open_file */
     no_kernel_obj_list,       /* get_kernel_obj_list */
+    no_get_inproc_sync,       /* get_inproc_sync */
     no_close_handle,          /* close_handle */
     inode_destroy             /* destroy */
 };
@@ -314,6 +318,7 @@ static const struct object_ops file_lock_ops =
     NULL,                       /* unlink_name */
     no_open_file,               /* open_file */
     no_kernel_obj_list,         /* get_kernel_obj_list */
+    no_get_inproc_sync,         /* get_inproc_sync */
     no_close_handle,            /* close_handle */
     no_destroy                  /* destroy */
 };
@@ -350,7 +355,7 @@ timeout_t current_time;
 timeout_t monotonic_time;
 
 struct _KUSER_SHARED_DATA *user_shared_data = NULL;
-static const int user_shared_data_timeout = 16;
+static const timeout_t user_shared_data_timeout = 16 * 10000;
 
 static void atomic_store_ulong(volatile ULONG *ptr, ULONG value)
 {
@@ -508,7 +513,7 @@ static int active_users;                    /* current number of active users */
 static int allocated_users;                 /* count of allocated entries in the array */
 static struct fd **freelist;                /* list of free entries in the array */
 
-static int get_next_timeout(void);
+static int get_next_timeout( struct timespec *ts );
 
 static inline void fd_poll_event( struct fd *fd, int event )
 {
@@ -573,10 +578,33 @@ static inline void remove_epoll_user( struct fd *fd, int user )
     }
 }
 
+/* HACK: Add syscall for epoll_pwait2 */
+#ifndef HAVE_EPOLL_PWAIT2
+#ifdef HAVE_SYS_SYSCALL_H
+#define HAVE_EPOLL_PWAIT2
+
+#ifndef __NR_epoll_pwait2
+#define __NR_epoll_pwait2 441
+#endif
+
+int epoll_pwait2(int epfd, struct epoll_event *events,
+                      int maxevents, const struct timespec *timeout,
+                      const sigset_t *sigmask)
+{
+    return syscall(__NR_epoll_pwait2, epfd, events, maxevents, timeout, sigmask);
+}
+
+#endif
+#endif
+
 static inline void main_loop_epoll(void)
 {
     int i, ret, timeout;
+    struct timespec ts;
     struct epoll_event events[128];
+#ifdef HAVE_EPOLL_PWAIT2
+    static int failed_epoll_pwait2 = 0;
+#endif
 
     assert( POLLIN == EPOLLIN );
     assert( POLLOUT == EPOLLOUT );
@@ -587,12 +615,22 @@ static inline void main_loop_epoll(void)
 
     while (active_users)
     {
-        timeout = get_next_timeout();
+        timeout = get_next_timeout( &ts );
 
         if (!active_users) break;  /* last user removed by a timeout */
         if (epoll_fd == -1) break;  /* an error occurred with epoll */
 
-        ret = epoll_wait( epoll_fd, events, ARRAY_SIZE( events ), timeout );
+#ifdef HAVE_EPOLL_PWAIT2
+        if (!failed_epoll_pwait2)
+        {
+            ret = epoll_pwait2( epoll_fd, events, ARRAY_SIZE( events ), timeout == -1 ? NULL : &ts, NULL );
+            if (ret == -1 && errno == ENOSYS)
+                failed_epoll_pwait2 = 1;
+        }
+        if (failed_epoll_pwait2)
+#endif
+            ret = epoll_wait( epoll_fd, events, ARRAY_SIZE( events ), timeout );
+
         set_current_time();
 
         /* put the events into the pollfd array first, like poll does */
@@ -675,26 +713,19 @@ static inline void remove_epoll_user( struct fd *fd, int user )
 static inline void main_loop_epoll(void)
 {
     int i, ret, timeout;
+    struct timespec ts;
     struct kevent events[128];
 
     if (kqueue_fd == -1) return;
 
     while (active_users)
     {
-        timeout = get_next_timeout();
+        timeout = get_next_timeout( &ts );
 
         if (!active_users) break;  /* last user removed by a timeout */
         if (kqueue_fd == -1) break;  /* an error occurred with kqueue */
 
-        if (timeout != -1)
-        {
-            struct timespec ts;
-
-            ts.tv_sec = timeout / 1000;
-            ts.tv_nsec = (timeout % 1000) * 1000000;
-            ret = kevent( kqueue_fd, NULL, 0, events, ARRAY_SIZE( events ), &ts );
-        }
-        else ret = kevent( kqueue_fd, NULL, 0, events, ARRAY_SIZE( events ), NULL );
+        ret = kevent( kqueue_fd, NULL, 0, events, ARRAY_SIZE( events ), timeout == -1 ? NULL : &ts );
 
         set_current_time();
 
@@ -777,27 +808,20 @@ static inline void remove_epoll_user( struct fd *fd, int user )
 static inline void main_loop_epoll(void)
 {
     int i, nget, ret, timeout;
+    struct timespec ts;
     port_event_t events[128];
 
     if (port_fd == -1) return;
 
     while (active_users)
     {
-        timeout = get_next_timeout();
+        timeout = get_next_timeout( &ts );
         nget = 1;
 
         if (!active_users) break;  /* last user removed by a timeout */
         if (port_fd == -1) break;  /* an error occurred with event completion */
 
-        if (timeout != -1)
-        {
-            struct timespec ts;
-
-            ts.tv_sec = timeout / 1000;
-            ts.tv_nsec = (timeout % 1000) * 1000000;
-            ret = port_getn( port_fd, events, ARRAY_SIZE( events ), &nget, &ts );
-        }
-        else ret = port_getn( port_fd, events, ARRAY_SIZE( events ), &nget, NULL );
+        ret = port_getn( port_fd, events, ARRAY_SIZE( events ), &nget, timeout == -1 ? NULL : &ts );
 
 	if (ret == -1) break;  /* an error occurred with event completion */
 
@@ -888,10 +912,11 @@ static void remove_poll_user( struct fd *fd, int user )
     active_users--;
 }
 
-/* process pending timeouts and return the time until the next timeout, in milliseconds */
-static int get_next_timeout(void)
+/* process pending timeouts and return the time until the next timeout in milliseconds,
+ * and full nanosecond precision in the timespec parameter if given */
+static int get_next_timeout( struct timespec *ts )
 {
-    int ret = user_shared_data ? user_shared_data_timeout : -1;
+    timeout_t ret = user_shared_data ? user_shared_data_timeout : -1;
 
     if (!list_empty( &abs_timeout_list ) || !list_empty( &rel_timeout_list ))
     {
@@ -936,21 +961,32 @@ static int get_next_timeout(void)
         if ((ptr = list_head( &abs_timeout_list )) != NULL)
         {
             struct timeout_user *timeout = LIST_ENTRY( ptr, struct timeout_user, entry );
-            timeout_t diff = (timeout->when - current_time + 9999) / 10000;
-            if (diff > INT_MAX) diff = INT_MAX;
-            else if (diff < 0) diff = 0;
+            timeout_t diff = timeout->when - current_time;
+            if (diff < 0) diff = 0;
             if (ret == -1 || diff < ret) ret = diff;
         }
 
         if ((ptr = list_head( &rel_timeout_list )) != NULL)
         {
             struct timeout_user *timeout = LIST_ENTRY( ptr, struct timeout_user, entry );
-            timeout_t diff = (-timeout->when - monotonic_time + 9999) / 10000;
-            if (diff > INT_MAX) diff = INT_MAX;
-            else if (diff < 0) diff = 0;
+            timeout_t diff = -timeout->when - monotonic_time;
+            if (diff < 0) diff = 0;
             if (ret == -1 || diff < ret) ret = diff;
         }
     }
+
+    /* infinite */
+    if (ret == -1) return -1;
+
+    if (ts)
+    {
+        ts->tv_sec = ret / TICKS_PER_SEC;
+        ts->tv_nsec = (ret % TICKS_PER_SEC) * 100;
+    }
+
+    /* convert to milliseconds, ceil to avoid spinning with 0 timeout */
+    ret = (ret + 9999) / 10000;
+    if (ret > INT_MAX) ret = INT_MAX;
     return ret;
 }
 
@@ -967,7 +1003,7 @@ void main_loop(void)
 
     while (active_users)
     {
-        timeout = get_next_timeout();
+        timeout = get_next_timeout( NULL );
 
         if (!active_users) break;  /* last user removed by a timeout */
 
@@ -1585,6 +1621,7 @@ static void fd_destroy( struct object *obj )
         free( fd->unix_name );
     }
 
+    if (use_inproc_sync()) close( fd->inproc_sync );
     if (do_esync())
         close( fd->esync_fd );
     if (fd->fsync_idx) fsync_free_shm_idx( fd->fsync_idx );
@@ -1708,6 +1745,7 @@ static struct fd *alloc_fd_object(void)
     fd->comp_flags = 0;
     fd->esync_fd   = -1;
     fd->fsync_idx  = 0;
+    fd->inproc_sync = create_inproc_event( TRUE, fd->signaled );
     init_async_queue( &fd->read_q );
     init_async_queue( &fd->write_q );
     init_async_queue( &fd->wait_q );
@@ -1757,6 +1795,7 @@ struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *use
     fd->no_fd_status = STATUS_BAD_DEVICE_TYPE;
     fd->esync_fd   = -1;
     fd->fsync_idx  = 0;
+    fd->inproc_sync = create_inproc_event( TRUE, fd->inproc_sync );
     init_async_queue( &fd->read_q );
     init_async_queue( &fd->write_q );
     init_async_queue( &fd->wait_q );
@@ -2212,13 +2251,18 @@ void set_fd_signaled( struct fd *fd, int signaled )
 {
     if (fd->comp_flags & FILE_SKIP_SET_EVENT_ON_HANDLE) return;
     fd->signaled = signaled;
-    if (signaled) wake_up( fd->user, 0 );
+    if (signaled)
+    {
+        wake_up( fd->user, 0 );
+        set_inproc_event( fd->inproc_sync );
+    }
+    else
+    {
+        reset_inproc_event( fd->inproc_sync );
 
-    if (do_fsync() && !signaled)
-        fsync_clear( fd->user );
-
-    if (do_esync() && !signaled)
-        esync_clear( fd->esync_fd );
+        if (do_fsync()) fsync_clear( fd->user );
+        if (do_esync()) esync_clear( fd->esync_fd );
+    }
 }
 
 /* check if events are pending and if yes return which one(s) */
@@ -2233,6 +2277,17 @@ int check_fd_events( struct fd *fd, int events )
     pfd.events = events;
     if (poll( &pfd, 1, 0 ) <= 0) return 0;
     return pfd.revents;
+}
+
+int default_fd_get_inproc_sync( struct object *obj, enum inproc_sync_type *type )
+{
+    struct fd *fd = get_obj_fd( obj );
+    int ret;
+
+    *type = INPROC_SYNC_MANUAL_SERVER;
+    ret = fd->inproc_sync;
+    release_object( fd );
+    return ret;
 }
 
 /* default signaled() routine for objects that poll() on an fd */

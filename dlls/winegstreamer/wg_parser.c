@@ -29,6 +29,8 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define GLIB_VERSION_MIN_REQUIRED GLIB_VERSION_2_30
 #include <gst/gst.h>
@@ -271,6 +273,7 @@ static NTSTATUS wg_parser_stream_enable(void *args)
     struct wg_parser_stream *stream = get_stream(params->stream);
     const struct wg_format *format = params->format;
     struct wg_parser *parser = stream->parser;
+    const char *env = getenv("PROTON_GST_VIDEO_ORIENTATION");
 
     pthread_mutex_lock(&parser->mutex);
 
@@ -284,6 +287,28 @@ static NTSTATUS wg_parser_stream_enable(void *args)
         bool flip = (format->u.video.height < 0);
 
         gst_util_set_object_arg(G_OBJECT(stream->flip), "method", flip ? "vertical-flip" : "none");
+    }
+
+    /* Proton override: if PROTON_GST_VIDEO_ORIENTATION is set then manually set orientation based on value */
+    if (env && !strcmp(env, "automatic"))
+    {
+        GST_INFO("Manual video orientation: automatic.");
+        gst_util_set_object_arg(G_OBJECT(stream->flip), "method", "automatic");
+    }
+    if (env && !strcmp(env, "vertical-flip"))
+    {
+        GST_INFO("Manual video orientation: vertical-flip.");
+        gst_util_set_object_arg(G_OBJECT(stream->flip), "method", "vertical-flip");
+    }
+    if (env && !strcmp(env, "horizontal-flip"))
+    {
+        GST_INFO("Manual video orientation: horizontal-flip.");
+        gst_util_set_object_arg(G_OBJECT(stream->flip), "method", "horizontal-flip");
+    }
+    if (env && !strcmp(env, "rotate-180"))
+    {
+        GST_INFO("Manual video orientation: rotate-180.");
+        gst_util_set_object_arg(G_OBJECT(stream->flip), "method", "rotate-180");
     }
 
     push_event(stream->my_sink, gst_event_new_reconfigure());

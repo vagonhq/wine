@@ -3811,6 +3811,17 @@ struct handle_info
 @END
 
 
+/* Get kernel pointer from object name */
+@REQ(get_kernel_object_name)
+    obj_handle_t rootdir;         /* root directory */
+    obj_handle_t manager;         /* handle to the device manager */
+    unsigned int attributes;      /* object attributes */
+    VARARG(name,unicode_str);     /* object name */
+@REPLY
+    client_ptr_t user_ptr;        /* kernel object pointer */
+@END
+
+
 /* Make the current process a system process */
 @REQ(make_process_system)
     obj_handle_t handle;          /* handle to the process */
@@ -4253,4 +4264,43 @@ enum fsync_type
 @REQ(fsync_free_shm_idx)
     unsigned int shm_idx;
 @REPLY
+@END
+
+enum inproc_sync_type
+{
+    INPROC_SYNC_UNKNOWN,
+    INPROC_SYNC_AUTO_EVENT,
+    INPROC_SYNC_MANUAL_EVENT,
+    INPROC_SYNC_SEMAPHORE,
+    INPROC_SYNC_MUTEX,
+    INPROC_SYNC_AUTO_SERVER,
+    INPROC_SYNC_MANUAL_SERVER,
+    INPROC_SYNC_QUEUE,
+};
+
+/* Obtain a fd for the ntsync device */
+@REQ(get_linux_sync_device)
+@END
+
+/* Get the in-process synchronization fd associated with the waitable handle */
+@REQ(get_linux_sync_obj)
+    obj_handle_t handle;        /* handle to the object */
+@REPLY
+    int type;                   /* object type */
+    unsigned int access;        /* handle access rights */
+@END
+
+/* Begin a client-side wait on a message queue */
+@REQ(select_inproc_queue)
+@END
+
+/* End a client-side wait on a message queue */
+@REQ(unselect_inproc_queue)
+    int          signaled;        /* was the queue signaled? */
+@END
+
+/* Get an event handle to be used for thread alerts with in-process synchronization */
+@REQ(get_inproc_alert_event)
+@REPLY
+    obj_handle_t handle;          /* handle to the event */
 @END
