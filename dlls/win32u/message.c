@@ -20,6 +20,7 @@
  */
 
 
+#include <limits.h>
 #if 0
 #pragma makedep unix
 #endif
@@ -2372,6 +2373,32 @@ static void send_parent_notify( HWND hwnd, WORD event, WORD idChild, POINT pt )
     }
 }
 
+static void pixel_to_himetric(POINT *pixel, POINT *himetric)
+{
+    HDC hdc = NtUserGetDC(NULL);
+    int dpi_x = hdc ? NtGdiGetDeviceCaps(hdc, LOGPIXELSX) : 96;
+    int dpi_y = hdc ? NtGdiGetDeviceCaps(hdc, LOGPIXELSY) : 96;
+    if (hdc) NtUserReleaseDC(NULL, hdc);
+    himetric->x = (pixel->x * 2540) / dpi_x;
+    himetric->y = (pixel->y * 2540) / dpi_y;
+}
+
+static UINT32 get_frame_id_for_timestamp(DWORD event_timestamp)
+{
+    struct pointer_thread_data *pointer_data = get_pointer_thread_data();
+    if (!pointer_data) return 0;
+
+    /* If this is a new timestamp, allocate a new frame ID */
+    if (event_timestamp != pointer_data->last_update_time)
+    {
+        pointer_data->current_frame_id++;
+        pointer_data->last_update_time = event_timestamp;
+    }
+
+    /* Return the current frame ID (shared by all events with this timestamp) */
+    return pointer_data->current_frame_id;
+}
+
 /***********************************************************************
  *          process_pointer_message
  *
@@ -2379,13 +2406,136 @@ static void send_parent_notify( HWND hwnd, WORD event, WORD idChild, POINT pt )
  */
 static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware_msg_data *msg_data )
 {
+    struct pointer_thread_data *pointer_data = NULL;
+    struct pointer_info_entry *pointer_entry = NULL;
+    POINTER_TOUCH_INFO info;
     RECT rect;
-
+    UINT32 pointer_id;
+    UINT32 idx;
+    UINT32 chosen=0;
+    DWORD oldest_timestamp = UINT_MAX;
+    UINT32 oldest_pointer_idx = UINT_MAX, free_slot = UINT_MAX;
+    struct ntuser_thread_info *thread_info = NULL;
+    DWORD thread_id = 0;
     SetRect( &rect, LOWORD(msg->lParam), HIWORD(msg->lParam), LOWORD(msg->lParam), HIWORD(msg->lParam) );
     rect = map_rect_raw_to_virt( rect, get_thread_dpi() );
     msg->lParam = MAKELPARAM(rect.left, rect.top);
 
     msg->pt = point_phys_to_win_dpi( msg->hwnd, msg->pt );
+
+    if (msg->message != WM_POINTERDOWN && msg->message != WM_POINTERUPDATE && msg->message != WM_POINTERUP) return TRUE;
+    pointer_id = GET_POINTERID_WPARAM(msg->wParam);
+    pointer_data  = get_pointer_thread_data();
+    if (!pointer_data) return TRUE;
+    thread_info = NtUserGetThreadInfo();
+    thread_id = GetCurrentThreadId();
+    WARN("SEARCH id %u frameID %u timestamp %u msg %#x p_pointer %p thread_p %p thread_id %u\n", pointer_id, pointer_data->current_frame_id, pointer_data->last_update_time, msg->message, pointer_data, thread_info, thread_id );
+    for (UINT32 i = 0; i < ARRAY_SIZE(pointer_data->pointers); i++)
+    {
+        WARN("LOOP idx %u pointerid %u type %d active %d\n", i, pointer_data->pointers[i].pointer_id, (int)pointer_data->pointers[i].type, (int)pointer_data->pointers[i].active);
+        if (pointer_data->pointers[i].pointer_id == pointer_id)
+        {
+            pointer_entry = &pointer_data->pointers[i];
+            chosen = i;
+            break;
+        }
+        if (free_slot == UINT_MAX && pointer_data->pointers[i].pointer_id == 0) free_slot = i;
+        if (!pointer_data->pointers[i].active && oldest_timestamp > pointer_data->pointers[i].timestamp) {
+            oldest_timestamp = pointer_data->pointers[i].timestamp;
+            oldest_pointer_idx = i;
+        }
+    }
+    if (!pointer_entry)
+    {
+        if (free_slot != UINT_MAX)
+        {
+            pointer_entry = &pointer_data->pointers[free_slot];
+            chosen = free_slot;
+            WARN("chosen free pointer idx %u\n", chosen);
+        }
+        else if (oldest_pointer_idx != UINT_MAX)
+        {
+            pointer_entry = &pointer_data->pointers[oldest_pointer_idx];
+            chosen = oldest_pointer_idx;
+            WARN("chosen oldest pointer idx %u\n", chosen);
+        }
+    }
+
+    WARN("chosen pointer idx %u\n", chosen);
+
+    if (!pointer_entry)
+    {
+        WARN("Cannot add touch event\n");
+        return TRUE;
+    }
+
+    if (pointer_entry->history_count > 0)
+    {
+        UINT32 prev_idx;
+        prev_idx = (pointer_entry->history_head + MAX_POINTER_HISTORY - 1) % MAX_POINTER_HISTORY;
+        if (pointer_entry->history[prev_idx].data.pointer.ptPixelLocation.x == rect.left &&
+            pointer_entry->history[prev_idx].data.pointer.ptPixelLocation.y == rect.top)
+        {
+            WARN("OVERWRITE prev_idx %u\n", prev_idx);
+            pointer_entry->history_head = 0;
+            pointer_entry->history_count = 0;
+        }
+        // if (pointer_entry->history[prev_idx].data.pointer.pointerFlags & POINTER_FLAG_PRIMARY && pointer_entry->active)
+        //     info.pointerInfo.pointerFlags |= POINTER_FLAG_PRIMARY;
+    }
+
+    memset(&info, 0, sizeof(info));
+    info.pointerInfo.pointerType = PT_TOUCH;
+    info.pointerInfo.pointerId = pointer_id;
+    info.pointerInfo.pointerFlags = POINTER_FLAG_PRIMARY;//POINTER_FLAG_NONE;
+
+    if (msg->message == WM_POINTERDOWN)
+        info.pointerInfo.pointerFlags |= POINTER_FLAG_NEW | POINTER_FLAG_FIRSTBUTTON | POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+    else if (msg->message == WM_POINTERUPDATE)
+        info.pointerInfo.pointerFlags |= POINTER_FLAG_FIRSTBUTTON | POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+    else if (msg->message == WM_POINTERUP)
+        info.pointerInfo.pointerFlags |= POINTER_FLAG_UP;
+
+    info.pointerInfo.ptPixelLocation.x = rect.left;
+    info.pointerInfo.ptPixelLocation.y = rect.top;
+    pixel_to_himetric(&msg->pt, &info.pointerInfo.ptHimetricLocation);
+    info.pointerInfo.ptPixelLocationRaw = info.pointerInfo.ptPixelLocation;
+    info.pointerInfo.ptHimetricLocationRaw = info.pointerInfo.ptHimetricLocation;
+    info.pointerInfo.dwTime = msg->time;
+    info.pointerInfo.hwndTarget = msg->hwnd;
+    info.pointerInfo.sourceDevice = INVALID_HANDLE_VALUE;
+
+    info.touchFlags = TOUCH_FLAG_NONE;
+    info.touchMask = TOUCH_MASK_NONE;
+    info.rcContact.left = rect.left;
+    info.rcContact.top = rect.top;
+    info.rcContact.right = rect.right;
+    info.rcContact.bottom = rect.bottom;
+    info.rcContactRaw = info.rcContact;
+    NtQueryPerformanceCounter((LARGE_INTEGER *)&info.pointerInfo.PerformanceCount, NULL);
+
+    pointer_entry->pointer_id = pointer_id;
+    pointer_entry->type = PT_TOUCH;
+    if (msg->message == WM_POINTERDOWN)
+    {
+        pointer_entry->active = TRUE;
+        pointer_entry->history_count = 0;
+        pointer_entry->history_head = 0;
+    }
+
+    idx = pointer_entry->history_head;
+    pointer_entry->history[idx].data.touch = info;
+    pointer_entry->history_head = (pointer_entry->history_head + 1) % MAX_POINTER_HISTORY;
+    if (pointer_entry->history_count < MAX_POINTER_HISTORY)
+        pointer_entry->history_count++;
+
+    pointer_entry->history[idx].data.pointer.historyCount = pointer_entry->history_count;
+    pointer_entry->history[idx].data.pointer.frameId = get_frame_id_for_timestamp(msg->time);
+
+    WARN("RETURN pointer flag %#x frameid %u p_pointer %p p_pointer_temp %p\n", info.pointerInfo.pointerFlags, pointer_entry->history[idx].data.pointer.frameId, &pointer_data->pointers[chosen], pointer_entry);
+    if (msg->message == WM_POINTERUP)
+       pointer_entry->active = FALSE;
+
     return TRUE;
 }
 
@@ -2500,6 +2650,145 @@ static WORD pointer_buttons_from_mouse_buttons( WORD mouse_flags )
     return pointer_flags;
 }
 
+static POINTER_BUTTON_CHANGE_TYPE get_button_change_type(UINT message, WORD new_flags, WORD old_flags)
+{
+    WORD pressed = new_flags & ~old_flags;   /* Newly pressed buttons */
+    WORD released = old_flags & ~new_flags;  /* Newly released buttons */
+
+    if (message == WM_POINTERDOWN)
+    {
+        if (pressed & POINTER_MESSAGE_FLAG_FIRSTBUTTON)
+            return POINTER_CHANGE_FIRSTBUTTON_DOWN;  // = 1
+        if (pressed & POINTER_MESSAGE_FLAG_SECONDBUTTON)
+            return POINTER_CHANGE_SECONDBUTTON_DOWN;  // = 3
+        if (pressed & POINTER_MESSAGE_FLAG_THIRDBUTTON)
+            return POINTER_CHANGE_THIRDBUTTON_DOWN;  // = 5
+    }
+    else if (message == WM_POINTERUP)
+    {
+        if (released & POINTER_MESSAGE_FLAG_FIRSTBUTTON)
+            return POINTER_CHANGE_FIRSTBUTTON_UP;  // = 2
+        if (released & POINTER_MESSAGE_FLAG_SECONDBUTTON)
+            return POINTER_CHANGE_SECONDBUTTON_UP;  // = 4
+        if (released & POINTER_MESSAGE_FLAG_THIRDBUTTON)
+            return POINTER_CHANGE_THIRDBUTTON_UP;  // = 6
+    }
+
+    return POINTER_CHANGE_NONE;  // = 0
+}
+
+static void update_pointer_state_from_mouse( UINT message, DWORD timestamp, WORD flags, POINT pt, HWND hwnd )
+{
+    struct pointer_thread_data *pointer_data = NULL;
+    struct pointer_info_entry *pointer_entry = NULL;
+    POINTER_INFO info;
+    UINT32 pointer_id = 1;  /* Mouse is always pointer ID 1 */
+    WORD old_flags = 0;
+    POINT himetric_location;
+    UINT32 idx;
+    UINT32 previous_idx;
+    
+    pointer_data = get_pointer_thread_data();
+    if (!pointer_data) return;
+    
+    for (UINT32 i = 0; i < ARRAY_SIZE(pointer_data->pointers); i++)
+    {
+        if (pointer_data->pointers[i].pointer_id == pointer_id && pointer_data->pointers[i].active)
+        {
+            pointer_entry = &pointer_data->pointers[i];
+            break;
+        }
+        if (!pointer_entry && !pointer_data->pointers[i].active)
+            pointer_entry = &pointer_data->pointers[i];
+    }
+
+    if (!pointer_entry) return;
+
+    memset(&info, 0, sizeof(info));
+    
+    /* Fill POINTER_INFO from mouse message parameters */
+    info.pointerType = PT_MOUSE;
+    info.pointerId = pointer_id;
+    info.frameId = get_frame_id_for_timestamp(timestamp);
+    
+    if (pointer_entry->active && pointer_entry->history_count > 0)
+    {
+        previous_idx = (pointer_entry->history_head + MAX_POINTER_HISTORY - 1) % MAX_POINTER_HISTORY;
+        // pointer_entry->history[previous_idx].data.pointer.pointerFlags
+        // Convert Windows flags back to Wine flags for comparison
+        if (pointer_entry->history[previous_idx].data.pointer.pointerFlags & POINTER_FLAG_FIRSTBUTTON)
+            old_flags |= POINTER_MESSAGE_FLAG_FIRSTBUTTON;
+        if (pointer_entry->history[previous_idx].data.pointer.pointerFlags & POINTER_FLAG_SECONDBUTTON)
+            old_flags |= POINTER_MESSAGE_FLAG_SECONDBUTTON;
+        if (pointer_entry->history[previous_idx].data.pointer.pointerFlags & POINTER_FLAG_THIRDBUTTON)
+            old_flags |= POINTER_MESSAGE_FLAG_THIRDBUTTON;
+    }
+
+    /* Convert Wine's pointer flags to Windows POINTER_FLAGS */
+    info.pointerFlags = 0;
+    if (flags & POINTER_MESSAGE_FLAG_INRANGE)
+        info.pointerFlags |= POINTER_FLAG_INRANGE;
+    if (flags & POINTER_MESSAGE_FLAG_INCONTACT)
+        info.pointerFlags |= POINTER_FLAG_INCONTACT;
+    if (flags & POINTER_MESSAGE_FLAG_PRIMARY)
+        info.pointerFlags |= POINTER_FLAG_PRIMARY;
+    if (flags & POINTER_MESSAGE_FLAG_FIRSTBUTTON)
+        info.pointerFlags |= POINTER_FLAG_FIRSTBUTTON;
+    if (flags & POINTER_MESSAGE_FLAG_SECONDBUTTON)
+        info.pointerFlags |= POINTER_FLAG_SECONDBUTTON;
+    if (flags & POINTER_MESSAGE_FLAG_THIRDBUTTON)
+        info.pointerFlags |= POINTER_FLAG_THIRDBUTTON;
+    
+    /* Set pointer state flags based on message type */
+    switch (message)
+    {
+        case WM_POINTERDOWN:
+            info.pointerFlags |= POINTER_FLAG_DOWN;
+            break;
+        case WM_POINTERUP:
+            info.pointerFlags |= POINTER_FLAG_UP;
+            break;
+        case WM_POINTERUPDATE:
+            info.pointerFlags |= POINTER_FLAG_UPDATE;
+            info.ButtonChangeType = POINTER_CHANGE_NONE;
+            break;
+        default:
+            info.ButtonChangeType = POINTER_CHANGE_NONE;
+            break;
+    }
+    
+    info.ButtonChangeType = get_button_change_type(message, flags, old_flags);
+    /* Store position */
+    info.ptPixelLocation.x = pt.x;
+    info.ptPixelLocation.y = pt.y;
+    info.ptPixelLocationRaw = pt;
+
+    pixel_to_himetric(&pt, &himetric_location);
+    info.ptHimetricLocation = himetric_location;
+    info.ptHimetricLocationRaw = himetric_location;
+    /* Store other info */
+    info.hwndTarget = hwnd;
+    info.dwTime = timestamp;
+    info.historyCount = 1; // history is not saved for mouse
+    info.InputData = 0;
+    info.dwKeyStates = (NtUserGetKeyState(VK_SHIFT) & 0x8000 ? 0x0004 : 0) |
+                        (NtUserGetKeyState(VK_CONTROL) & 0x8000 ? 0x0008 : 0);
+    info.sourceDevice = INVALID_HANDLE_VALUE;
+    NtQueryPerformanceCounter((LARGE_INTEGER *)&info.PerformanceCount, NULL);
+    
+    idx = pointer_entry->history_head;
+    pointer_entry->history[idx].data.pointer = info;
+    pointer_entry->history_head = (pointer_entry->history_head + 1) % MAX_POINTER_HISTORY;
+    if (pointer_entry->history_count < MAX_POINTER_HISTORY)
+        pointer_entry->history_count++;
+    pointer_entry->active = TRUE;
+    pointer_entry->pointer_id = pointer_id;
+    pointer_entry->timestamp = timestamp;
+    
+    TRACE("Updated pointer state: id=%u, pos=(%d,%d), flags=0x%x, msg=0x%x\n",
+          pointer_id, pt.x, pt.y, info.pointerFlags, message);
+}
+
 /***********************************************************************
  *          process_mouse_message
  *
@@ -2520,6 +2809,7 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
     WPARAM wparam;
 
     /* find the window to dispatch this mouse message to */
+    TRACE("process_mouse_message\n");
 
     info.cbSize = sizeof(info);
     NtUserGetGUIThreadInfo( GetCurrentThreadId(), &info );
@@ -2557,15 +2847,16 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
     {
         WORD flags = POINTER_MESSAGE_FLAG_INRANGE, pointer_button_flags;
         DWORD message = 0;
+        TRACE("process_mouse_message mouse in pointer\n");
 
         pointer_button_flags = pointer_buttons_from_mouse_buttons( LOWORD( msg->wParam ));
         if (pointer_button_flags) flags |= pointer_button_flags | POINTER_MESSAGE_FLAG_INCONTACT;
+        flags |= POINTER_MESSAGE_FLAG_PRIMARY;
 
         switch (msg->message)
         {
         case WM_MOUSEMOVE:
             message = WM_POINTERUPDATE;
-            if (!pointer_button_flags) flags |= POINTER_MESSAGE_FLAG_PRIMARY;
             break;
         case WM_LBUTTONDOWN:
         case WM_RBUTTONDOWN:
@@ -2580,7 +2871,6 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
             else
             {
                 message = WM_POINTERDOWN;
-                flags |= POINTER_MESSAGE_FLAG_PRIMARY;
             }
             break;
         case WM_LBUTTONUP:
@@ -2600,7 +2890,12 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
             break;
         }
 
-        if (message) send_message( msg->hwnd, message, MAKELONG( 1, flags ), MAKELONG( msg->pt.x, msg->pt.y ) );
+        TRACE("dispatching pointer message %u\n", message);
+        if (message)
+        {
+            update_pointer_state_from_mouse( message, msg->time, flags, msg->pt, msg->hwnd );
+            send_message( msg->hwnd, message, MAKELONG( 1, flags ), MAKELONG( msg->pt.x, msg->pt.y ) );
+        }
     }
 
     /* FIXME: is this really the right place for this hook? */

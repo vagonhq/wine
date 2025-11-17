@@ -854,16 +854,29 @@ BOOL WINAPI GetPointerPenInfo( UINT32 id, POINTER_PEN_INFO *info )
 
 BOOL WINAPI GetPointerTouchInfo( UINT32 id, POINTER_TOUCH_INFO *info )
 {
-    FIXME( "id %u, info %p stub!\n", id, info );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    UINT32 pointer_count = 1, count = 1;
+
+    TRACE( "id %u, info %p\n", id, info );
+    return NtUserGetPointerInfoList( id, PT_TOUCH, 0, 0, sizeof(POINTER_TOUCH_INFO), &count, &pointer_count, info );
 }
 
 BOOL WINAPI GetPointerTouchInfoHistory( UINT32 id, UINT32 *count, POINTER_TOUCH_INFO *info )
 {
-    FIXME( "id %u, count %p, info %p stub!\n", id, count, info );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    UINT32 pointer_count = 0;
+
+    TRACE( "id %u, count %p, info %p\n", id, count, info );
+    if (!count) {
+        SetLastError ( ERROR_NOACCESS );
+        return FALSE;
+    }
+    TRACE( "id %u, count %u, info %p\n", id, *count, info );
+    if (*count != 0 && !info)
+    {
+        SetLastError ( ERROR_NOACCESS );
+        return FALSE;
+    }
+    if (*count > 0) pointer_count = 1;
+    return NtUserGetPointerInfoList( id, PT_TOUCH, 0, 0, sizeof(POINTER_TOUCH_INFO), count, &pointer_count, info );
 }
 
 

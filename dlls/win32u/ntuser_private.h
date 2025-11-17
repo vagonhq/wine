@@ -120,6 +120,35 @@ struct mouse_tracking_info
     POINT last_mouse_message_pos;
 };
 
+#define MAX_POINTER_HISTORY 64
+
+struct pointer_history_entry
+{
+    union {
+        POINTER_INFO pointer;
+        POINTER_TOUCH_INFO touch;
+        POINTER_PEN_INFO pen;
+    } data;
+};
+
+struct pointer_info_entry
+{
+    UINT32 pointer_id;
+    POINTER_INPUT_TYPE type;
+    struct pointer_history_entry history[MAX_POINTER_HISTORY];
+    UINT32 history_head;
+    UINT32 history_count;
+    BOOL active;
+    DWORD timestamp;
+};
+
+struct pointer_thread_data
+{
+    struct pointer_info_entry pointers[32];  /* Current pointer states, indexed by pointer_id */
+    DWORD last_update_time;                  /* Timestamp of last update */
+    UINT32 current_frame_id;
+};
+
 /* this is the structure stored in TEB->Win32ClientInfo */
 /* no attempt is made to keep the layout compatible with the Windows one */
 struct user_thread_info
@@ -143,6 +172,7 @@ struct user_thread_info
     DWORD                         clipping_reset;         /* time when clipping was last reset */
     struct session_thread_data   *session_data;           /* shared session thread data */
     struct mouse_tracking_info   *mouse_tracking_info;    /* NtUserTrackMouseEvent handling */
+    struct pointer_thread_data   *pointer_thread_data;
 };
 
 C_ASSERT( sizeof(struct user_thread_info) <= sizeof(((TEB *)0)->Win32ClientInfo) );
@@ -150,6 +180,20 @@ C_ASSERT( sizeof(struct user_thread_info) <= sizeof(((TEB *)0)->Win32ClientInfo)
 static inline struct user_thread_info *get_user_thread_info(void)
 {
     return CONTAINING_RECORD( NtUserGetThreadInfo(), struct user_thread_info, client_info );
+}
+
+static inline struct pointer_thread_data *get_pointer_thread_data(void)
+{
+    struct user_thread_info *thread_info = get_user_thread_info();
+    struct pointer_thread_data *data = thread_info->pointer_thread_data;
+
+    if (!data)
+    {
+        data = thread_info->pointer_thread_data = calloc(1, sizeof(struct pointer_thread_data));
+        if (!data) return NULL;
+    }
+
+    return data;
 }
 
 struct hook_extra_info
