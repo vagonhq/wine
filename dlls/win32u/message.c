@@ -2728,13 +2728,6 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
     pointer_data->current[pointer_id].timestamp = NtGetTickCount();
     pointer_data->active_pointers |= (1 << pointer_id);
     
-    /* Handle pointer up - deactivate */
-    if (message == WM_POINTERUP)
-    {
-        pointer_data->current[pointer_id].valid = FALSE;
-        pointer_data->active_pointers &= ~(1 << pointer_id);
-    }
-    
     TRACE("Updated pointer state: id=%u, pos=(%d,%d), flags=0x%x, msg=0x%x\n",
           pointer_id, pt.x, pt.y, info->pointerFlags, message);
 }
