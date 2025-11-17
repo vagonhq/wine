@@ -2648,11 +2648,39 @@ static WORD pointer_buttons_from_mouse_buttons( WORD mouse_flags )
     return pointer_flags;
 }
 
+static POINTER_BUTTON_CHANGE_TYPE get_button_change_type(UINT message, WORD new_flags, WORD old_flags)
+{
+    WORD pressed = new_flags & ~old_flags;   /* Newly pressed buttons */
+    WORD released = old_flags & ~new_flags;  /* Newly released buttons */
+
+    if (message == WM_POINTERDOWN)
+    {
+        if (pressed & POINTER_MESSAGE_FLAG_FIRSTBUTTON)
+            return POINTER_CHANGE_FIRSTBUTTON_DOWN;  // = 1
+        if (pressed & POINTER_MESSAGE_FLAG_SECONDBUTTON)
+            return POINTER_CHANGE_SECONDBUTTON_DOWN;  // = 3
+        if (pressed & POINTER_MESSAGE_FLAG_THIRDBUTTON)
+            return POINTER_CHANGE_THIRDBUTTON_DOWN;  // = 5
+    }
+    else if (message == WM_POINTERUP)
+    {
+        if (released & POINTER_MESSAGE_FLAG_FIRSTBUTTON)
+            return POINTER_CHANGE_FIRSTBUTTON_UP;  // = 2
+        if (released & POINTER_MESSAGE_FLAG_SECONDBUTTON)
+            return POINTER_CHANGE_SECONDBUTTON_UP;  // = 4
+        if (released & POINTER_MESSAGE_FLAG_THIRDBUTTON)
+            return POINTER_CHANGE_THIRDBUTTON_UP;  // = 6
+    }
+
+    return POINTER_CHANGE_NONE;  // = 0
+}
+
 static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt, HWND hwnd )
 {
     struct pointer_thread_data *pointer_data;
     POINTER_INFO *info;
     UINT32 pointer_id = 1;  /* Mouse is always pointer ID 1 */
+    WORD old_flags = 0;
     
     pointer_data = get_pointer_thread_data();
     if (!pointer_data) return;
@@ -2664,6 +2692,17 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
     info->pointerId = pointer_id;
     info->frameId = NtGetTickCount();  /* Or use a frame counter */
     
+    if (pointer_data->current[pointer_id].valid)
+    {
+        // Convert Windows flags back to Wine flags for comparison
+        if (info->pointerFlags & POINTER_FLAG_FIRSTBUTTON)
+            old_flags |= POINTER_MESSAGE_FLAG_FIRSTBUTTON;
+        if (info->pointerFlags & POINTER_FLAG_SECONDBUTTON)
+            old_flags |= POINTER_MESSAGE_FLAG_SECONDBUTTON;
+        if (info->pointerFlags & POINTER_FLAG_THIRDBUTTON)
+            old_flags |= POINTER_MESSAGE_FLAG_THIRDBUTTON;
+    }
+
     /* Convert Wine's pointer flags to Windows POINTER_FLAGS */
     info->pointerFlags = 0;
     if (flags & POINTER_MESSAGE_FLAG_INRANGE)
@@ -2684,21 +2723,9 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
     {
         case WM_POINTERDOWN:
             info->pointerFlags |= POINTER_FLAG_DOWN;
-            if (flags & POINTER_MESSAGE_FLAG_FIRSTBUTTON)
-                info->ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_DOWN;
-            else if (flags & POINTER_MESSAGE_FLAG_SECONDBUTTON)
-                info->ButtonChangeType = POINTER_CHANGE_SECONDBUTTON_DOWN;
-            else if (flags & POINTER_MESSAGE_FLAG_THIRDBUTTON)
-                info->ButtonChangeType = POINTER_CHANGE_THIRDBUTTON_DOWN;
             break;
         case WM_POINTERUP:
             info->pointerFlags |= POINTER_FLAG_UP;
-            if (flags & POINTER_MESSAGE_FLAG_FIRSTBUTTON)
-                info->ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_UP;
-            else if (flags & POINTER_MESSAGE_FLAG_SECONDBUTTON)
-                info->ButtonChangeType = POINTER_CHANGE_SECONDBUTTON_UP;
-            else if (flags & POINTER_MESSAGE_FLAG_THIRDBUTTON)
-                info->ButtonChangeType = POINTER_CHANGE_THIRDBUTTON_UP;
             break;
         case WM_POINTERUPDATE:
             info->pointerFlags |= POINTER_FLAG_UPDATE;
@@ -2709,6 +2736,7 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
             break;
     }
     
+    info->ButtonChangeType = get_button_change_type(message, flags, old_flags);
     /* Store position */
     info->ptPixelLocation.x = pt.x;
     info->ptPixelLocation.y = pt.y;
@@ -2835,8 +2863,11 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
         }
 
         TRACE("dispatching pointer message %u\n", message);
-        if (message) send_message( msg->hwnd, message, MAKELONG( 1, flags ), MAKELONG( msg->pt.x, msg->pt.y ) );
-        update_pointer_state_from_mouse( message, flags, msg->pt, msg->hwnd );
+        if (message)
+        {
+            update_pointer_state_from_mouse( message, flags, msg->pt, msg->hwnd );
+            send_message( msg->hwnd, message, MAKELONG( 1, flags ), MAKELONG( msg->pt.x, msg->pt.y ) );
+        }
     }
 
     /* FIXME: is this really the right place for this hook? */
