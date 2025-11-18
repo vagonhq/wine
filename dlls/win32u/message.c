@@ -3051,13 +3051,9 @@ static BOOL process_hardware_message( MSG *msg, UINT hw_id, const struct hardwar
     else if (is_keyboard_message( msg->message ))
         ret = process_keyboard_message( msg, hw_id, hwnd_filter, first, last, remove );
     else if (is_mouse_message( msg->message ))
-        { 
-    TRACE("processing mouse message \n");
-    ret = process_mouse_message( msg, hw_id, msg_data->info, hwnd_filter, first, last, remove ); }
+        ret = process_mouse_message( msg, hw_id, msg_data->info, hwnd_filter, first, last, remove );
     else if (msg->message >= WM_POINTERUPDATE && msg->message <= WM_POINTERLEAVE)
-        { 
-    TRACE("processing pointer message\n");
-    ret = process_pointer_message( msg, hw_id, msg_data ); }
+        ret = process_pointer_message( msg, hw_id, msg_data );
     else if (msg->message == WM_WINE_CLIPCURSOR)
         process_wine_clipcursor( msg->hwnd, msg->wParam, msg->lParam );
     else if (msg->message == WM_WINE_SETCURSOR)
