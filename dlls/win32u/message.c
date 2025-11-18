@@ -2815,12 +2815,12 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
 
         pointer_button_flags = pointer_buttons_from_mouse_buttons( LOWORD( msg->wParam ));
         if (pointer_button_flags) flags |= pointer_button_flags | POINTER_MESSAGE_FLAG_INCONTACT;
+        flags |= POINTER_MESSAGE_FLAG_PRIMARY;
 
         switch (msg->message)
         {
         case WM_MOUSEMOVE:
             message = WM_POINTERUPDATE;
-            if (!pointer_button_flags) flags |= POINTER_MESSAGE_FLAG_PRIMARY;
             break;
         case WM_LBUTTONDOWN:
         case WM_RBUTTONDOWN:
@@ -2835,7 +2835,6 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
             else
             {
                 message = WM_POINTERDOWN;
-                flags |= POINTER_MESSAGE_FLAG_PRIMARY;
             }
             break;
         case WM_LBUTTONUP:
