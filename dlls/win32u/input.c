@@ -2853,35 +2853,42 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
                                       UINT32 *entry_count, UINT32 *pointer_count, void *pointer_info )
 {
     struct pointer_thread_data *data;
-    POINTER_INFO *output = (POINTER_INFO *)pointer_info;
+    POINTER_INFO *output;
     UINT32 count = 0;
-    UINT32 total = 0;
     UINT32 max_entries;
     UINT32 total_valid = 0;
-    
+
     TRACE("id=%u, type=%d, size=%zu, entry_count=%p, pointer_count=%p, info=%p\n",
           id, (int)type, (size_t)size, entry_count, pointer_count, pointer_info);
-    
+
     /*
      * STEP 1: Validate parameters
      */
-    
+
     /* entry_count and pointer_count are required output parameters */
     if (!entry_count || !pointer_count)
     {
-        WARN("NULL output parameter\n");
-        RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
+        RtlSetLastWin32Error(ERROR_NOACCESS);
         return FALSE;
     }
-    
-    /* size must exactly match POINTER_INFO structure size */
-    if (size != sizeof(POINTER_INFO))
+
+    if ((type == PT_POINTER && size == sizeof(POINTER_INFO)) || (type == PT_MOUSE && size == sizeof(POINTER_INFO)))
     {
-        WARN("Invalid size: %zu (expected %zu)\n", (size_t)size, sizeof(POINTER_INFO));
-        RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
+        output = (POINTER_INFO*)pointer_info;
+    }
+    else if (type == PT_PEN && size == sizeof(POINTER_PEN_INFO))
+    {
+        output = &((POINTER_PEN_INFO*)pointer_info)->pointerInfo;
+    }
+    else if (type == PT_TOUCH && size == sizeof(POINTER_TOUCH_INFO))
+    {
+        output = &((POINTER_TOUCH_INFO*)pointer_info)->pointerInfo;
+    }
+    else
+    {
+        RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
         return FALSE;
     }
-    
     /* Store max entries requested (for later use) */
     max_entries = *entry_count;
     
@@ -2904,41 +2911,6 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
     }
 
     TRACE("active pointers %u last update %u total valid %u", data->active_pointers, data->last_update_time, total_valid);
-    /*
-     * STEP 3: Count active pointers matching the filter
-     */
-    
-    for (UINT32 i = 0; i < 32; i++)
-    {
-        /* Check if this pointer ID is active */
-        if (!(data->active_pointers & (1 << i)))
-            continue;
-        
-        /* Check if pointer is still valid (not timed out) */
-        if (!data->current[i].valid)
-            continue;
-        
-        /* Apply type filter (PT_POINTER means "any type") */
-        if (type != PT_POINTER && data->current[i].info.pointerType != type)
-            continue;
-        
-        total++;
-    }
-    
-    /* Always return total count of matching pointers */
-    *pointer_count = total;
-    
-    /*
-     * STEP 4: If pointer_info is NULL, caller just wants the count
-     * This is the standard Windows pattern for "query buffer size"
-     */
-    
-    if (!pointer_info)
-    {
-        *entry_count = 0;
-        TRACE("Returning count only: %u pointers\n", total);
-        return TRUE;
-    }
     
     /*
      * STEP 5: Handle query for specific pointer ID
@@ -2963,18 +2935,10 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
             return FALSE;
         }
         
-        /* Apply type filter */
-        if (type != PT_POINTER && data->current[id].info.pointerType != type)
-        {
-            WARN("Pointer ID %u type mismatch (want %d, have %d)\n", 
-                 id, type, data->current[id].info.pointerType);
-            RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
-            return FALSE;
-        }
-        
         /* Copy the single pointer info */
         output[0] = data->current[id].info;
         *entry_count = 1;
+        *pointer_count = 1;
         
         TRACE("Returning single pointer ID %u\n", id);
         return TRUE;
@@ -3004,9 +2968,6 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
         count++;
     }
     
-    /* Return actual number of entries copied */
-    *entry_count = count;
-    
     /*
      * STEP 7: Check if we have any data to return
      */
@@ -3018,6 +2979,9 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
         return FALSE;
     }
     
+    *entry_count = count;
+    *pointer_count = count;
+
     TRACE("Returning %u pointer(s)\n", count);
     return TRUE;
 }

@@ -2741,6 +2741,7 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
     info->InputData = 0;
     info->dwKeyStates = (NtUserGetKeyState(VK_SHIFT) & 0x8000 ? 0x0004 : 0) |
                         (NtUserGetKeyState(VK_CONTROL) & 0x8000 ? 0x0008 : 0);
+    info->sourceDevice = INVALID_HANDLE_VALUE;
     NtQueryPerformanceCounter((LARGE_INTEGER *)&info->PerformanceCount, NULL);
     
     /* Update entry state */
