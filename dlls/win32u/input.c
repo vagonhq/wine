@@ -2846,20 +2846,6 @@ static struct pointer_thread_data *get_pointer_thread_data(void)
     return data;
 }
 
-static POINTER_INFO *get_base_pointer_info(struct pointer_info_entry *entry, struct pointer_history_entry *hist)
-{
-    switch (entry->type)
-    {
-        case PT_TOUCH:
-        case PT_TOUCHPAD:
-            return &hist->data.touch.pointerInfo;
-        case PT_PEN:
-            return &hist->data.pen.pointerInfo;
-        default:
-            return &hist->data.pointer;
-    }
-}
-
 /**********************************************************************
  *       NtUserGetPointerInfoList    (win32u.@)
  */
@@ -2867,10 +2853,9 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
                                       UINT32 *entry_count, UINT32 *pointer_count, void *pointer_info )
 {
     struct pointer_thread_data *data;
-    POINTER_INFO *output;
-    POINTER_INFO *base_pointer_info;
-    // UINT32 count = 0;
-    // UINT32 max_entries;
+    struct pointer_info_entry *pointer_entry;
+    POINTER_INFO *output_base_pointer;
+    UINT32 return_count;
     UINT32 idx = 0;
     UINT32 history_head;
 
@@ -2890,15 +2875,15 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
 
     if ((type == PT_POINTER && size == sizeof(POINTER_INFO)) || (type == PT_MOUSE && size == sizeof(POINTER_INFO)))
     {
-        output = (POINTER_INFO*)pointer_info;
+        output_base_pointer = (POINTER_INFO*)pointer_info;
     }
     else if (type == PT_PEN && size == sizeof(POINTER_PEN_INFO))
     {
-        output = &((POINTER_PEN_INFO*)pointer_info)->pointerInfo;
+        output_base_pointer = &((POINTER_PEN_INFO*)pointer_info)->pointerInfo;
     }
     else if (type == PT_TOUCH && size == sizeof(POINTER_TOUCH_INFO))
     {
-        output = &((POINTER_TOUCH_INFO*)pointer_info)->pointerInfo;
+        output_base_pointer = &((POINTER_TOUCH_INFO*)pointer_info)->pointerInfo;
     }
     else
     {
@@ -2934,60 +2919,53 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
             break;
         }
     }
-    if (!data->pointers[idx].active || data->pointers[idx].pointer_id != id)
+    pointer_entry = &data->pointers[idx];
+    // if (!pointer_entry->active || pointer_entry->pointer_id != id)
+    if (pointer_entry->pointer_id != id)
     {
         RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    history_head = (data->pointers[idx].history_head + MAX_POINTER_HISTORY - 1) % MAX_POINTER_HISTORY;
-    base_pointer_info = get_base_pointer_info(&data->pointers[idx], &data->pointers[idx].history[history_head]);
-    output[0] = *base_pointer_info;
-    *entry_count = 1;
-    *pointer_count = 1;
 
-    TRACE("Returning single pointer ID %u\n", id);
+    if (*entry_count == 0)
+    {
+        *entry_count = pointer_entry->history_count;
+        return TRUE;
+    }
+    history_head = (pointer_entry->history_head + MAX_POINTER_HISTORY - 1) % MAX_POINTER_HISTORY;
+    return_count = min(*entry_count, pointer_entry->history[history_head].data.pointer.historyCount);
+    if (type != pointer_entry->type || pointer_entry->type == PT_MOUSE)
+    {
+        for (UINT32 i = 0; i < return_count; i++)
+        {
+            UINT32 copy_idx = (pointer_entry->history_head - 1 - i + MAX_POINTER_HISTORY) % MAX_POINTER_HISTORY;
+            output_base_pointer[i] = pointer_entry->history[copy_idx].data.pointer;
+        }
+        *entry_count = return_count;
+        *pointer_count = 1;
+        return TRUE;
+    }
+
+    if (type == PT_TOUCH)
+    {
+        TRACE( "Copying touch count %u\n", return_count );
+        for (UINT32 i = 0; i < return_count; i++)
+        {
+            UINT32 copy_idx = (pointer_entry->history_head - 1 - i + MAX_POINTER_HISTORY) % MAX_POINTER_HISTORY;
+            ((POINTER_TOUCH_INFO*)pointer_info)[i] = pointer_entry->history[copy_idx].data.touch;
+        }
+    }
+    else if (type == PT_PEN)
+    {
+        for (UINT32 i = 0; i < return_count; i++)
+        {
+            UINT32 copy_idx = (pointer_entry->history_head - 1 - i + MAX_POINTER_HISTORY) % MAX_POINTER_HISTORY;
+            ((POINTER_PEN_INFO*)pointer_info)[i] = pointer_entry->history[copy_idx].data.pen;
+        }
+    }
+    *entry_count = return_count;
+    *pointer_count = 1;
     return TRUE;
-    
-    /*
-     * STEP 6: Return all matching active pointers
-     * Fill up to max_entries pointers into the output buffer
-     */
-    
-    // for (UINT32 i = 0; i < 32 && count < max_entries; i++)
-    // {
-    //     /* Skip inactive pointers */
-    //     if (!(data->active_pointers & (1 << i)))
-    //         continue;
-    //
-    //     /* Skip invalid pointers */
-    //     if (!data->current[i].valid)
-    //         continue;
-    //
-    //     /* Apply type filter */
-    //     if (type != PT_POINTER && data->current[i].info.pointerType != type)
-    //         continue;
-    //
-    //     /* Copy pointer info to output buffer */
-    //     output[count] = data->current[i].info;
-    //     count++;
-    // }
-    
-    /*
-     * STEP 7: Check if we have any data to return
-     */
-    
-    // if (count == 0)
-    // {
-    //     WARN("No pointer data available\n");
-    //     RtlSetLastWin32Error(ERROR_NO_DATA);
-    //     return FALSE;
-    // }
-    //
-    // *entry_count = count;
-    // *pointer_count = count;
-    //
-    // TRACE("Returning %u pointer(s)\n", count);
-    // return TRUE;
 }
 
 BOOL get_clip_cursor( RECT *rect, UINT dpi, MONITOR_DPI_TYPE type )

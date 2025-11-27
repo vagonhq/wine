@@ -2393,7 +2393,12 @@ static struct pointer_thread_data *get_pointer_thread_data(void)
  */
 static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware_msg_data *msg_data )
 {
+    struct pointer_thread_data *pointer_data = NULL;
+    struct pointer_info_entry *pointer_entry = NULL;
+    POINTER_TOUCH_INFO info;
     RECT rect;
+    UINT32 pointer_id;
+    UINT32 idx;
 
     SetRect( &rect, LOWORD(msg->lParam), HIWORD(msg->lParam), LOWORD(msg->lParam), HIWORD(msg->lParam) );
     rect = map_rect_raw_to_virt( rect, get_thread_dpi() );
@@ -2401,72 +2406,71 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
 
     msg->pt = point_phys_to_win_dpi( msg->hwnd, msg->pt );
 
-    // pointer_id = GET_POINTERID_WPARAM(msg->wParam);
-    // touch_data = get_pointer_touch_thread_data();
-    // if (!touch_data) return TRUE;
-    //
-    // for (UINT32 i = 0; i < ARRAY_SIZE(touch_data); i++)
-    // {
-    //     if (touch_data->touch[i].pointer_id == pointer_id && touch_data->touch[i].active)
-    //     {
-    //         touch = &touch_data->touch[i];
-    //         break;
-    //     }
-    //     if (!touch && !touch_data->touch[i].active)
-    //         touch = &touch_data->touch[i];
-    // }
-    //
-    // if (!touch) return;
-    //
-    // memset(&info, 0, sizeof(info));
-    // info.pointerInfo.pointerType = PT_TOUCH;
-    // info.pointerInfo.pointerId = pointer_id;
-    // info.pointerInfo.pointerFlags = 0;
-    //
-    // if (msg->message == WM_POINTERDOWN)
-    //     info.pointerInfo.pointerFlags |= POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
-    // else if (msg->message == WM_POINTERUPDATE)
-    //     info.pointerInfo.pointerFlags |= POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
-    // else if (msg->message == WM_POINTERUP)
-    //     info.pointerInfo.pointerFlags |= POINTER_FLAG_UP;
-    //
-    // info.pointerInfo.ptPixelLocation.x = rect->left;
-    // info.pointerInfo.ptPixelLocation.y = rect->top;
-    // info.pointerInfo.ptHimetricLocation.x = rect->left * 100;
-    // info.pointerInfo.ptHimetricLocation.y = rect->top * 100;
-    // info.pointerInfo.ptPixelLocationRaw = info.pointerInfo.ptPixelLocation;
-    // info.pointerInfo.ptHimetricLocationRaw = info.pointerInfo.ptHimetricLocation;
-    // info.pointerInfo.dwTime = msg->time;
-    // info.pointerInfo.hwndTarget = msg->hwnd;
-    // info.pointerInfo.sourceDevice = INVALID_HANDLE_VALUE;
-    //
-    // info.touchFlags = TOUCH_FLAG_NONE;
-    // info.touchMask = TOUCH_MASK_NONE;
-    // info.rcContact.left = rect->left;
-    // info.rcContact.top = rect->top;
-    // info.rcContact.right = rect->left;
-    // info.rcContact.bottom = rect->top;
-    // info.rcContactRaw = info.rcContact;
-    //
-    // if (msg->message == WM_POINTERDOWN && !touch->active)
-    // {
-    //     touch->active = TRUE;
-    //     touch->pointer_id = pointer_id;
-    //     touch->history_count = 0;
-    //     touch->history_head = 0;
-    // }
-    //
-    // idx = touch->history_head;
-    // touch->history[idx] = info;
-    // touch->history_head = (touch->history_head + 1) % MAX_POINTER_HISTORY;
-    // if (touch->history_count < MAX_POINTER_HISTORY)
-    //     touch->history_count++;
-    //
-    // touch->history[idx].pointerInfo.historyCount = touch->history_count;
-    // touch->last_update = msg->time;
-    //
-    // if (msg->message == WM_POINTERUP)
-    //     touch->active = FALSE;
+    pointer_id = GET_POINTERID_WPARAM(msg->wParam);
+    pointer_data  = get_pointer_thread_data();
+    if (!pointer_data  ) return TRUE;
+
+    for (UINT32 i = 0; i < ARRAY_SIZE(pointer_data->pointers); i++)
+    {
+        if (pointer_data->pointers[i].pointer_id == pointer_id && pointer_data->pointers[i].active)
+        {
+            pointer_entry = &pointer_data->pointers[i];
+            break;
+        }
+        if (!pointer_entry && !pointer_data->pointers[i].active)
+            pointer_entry = &pointer_data->pointers[i];
+    }
+
+    if (!pointer_entry) return TRUE;
+
+    memset(&info, 0, sizeof(info));
+    info.pointerInfo.pointerType = PT_TOUCH;
+    info.pointerInfo.pointerId = pointer_id;
+    info.pointerInfo.pointerFlags = 0;
+
+    if (msg->message == WM_POINTERDOWN)
+        info.pointerInfo.pointerFlags |= POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+    else if (msg->message == WM_POINTERUPDATE)
+        info.pointerInfo.pointerFlags |= POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+    else if (msg->message == WM_POINTERUP)
+        info.pointerInfo.pointerFlags |= POINTER_FLAG_UP;
+
+    info.pointerInfo.ptPixelLocation.x = rect.left;
+    info.pointerInfo.ptPixelLocation.y = rect.top;
+    info.pointerInfo.ptHimetricLocation.x = rect.left * 100;
+    info.pointerInfo.ptHimetricLocation.y = rect.top * 100;
+    info.pointerInfo.ptPixelLocationRaw = info.pointerInfo.ptPixelLocation;
+    info.pointerInfo.ptHimetricLocationRaw = info.pointerInfo.ptHimetricLocation;
+    info.pointerInfo.dwTime = msg->time;
+    info.pointerInfo.hwndTarget = msg->hwnd;
+    info.pointerInfo.sourceDevice = INVALID_HANDLE_VALUE;
+
+    info.touchFlags = TOUCH_FLAG_NONE;
+    info.touchMask = TOUCH_MASK_NONE;
+    info.rcContact.left = rect.left;
+    info.rcContact.top = rect.top;
+    info.rcContact.right = rect.right;
+    info.rcContact.bottom = rect.bottom;
+    info.rcContactRaw = info.rcContact;
+
+    if (msg->message == WM_POINTERDOWN && !pointer_entry->active)
+    {
+        pointer_entry->active = TRUE;
+        pointer_entry->pointer_id = pointer_id;
+        pointer_entry->history_count = 0;
+        pointer_entry->history_head = 0;
+    }
+
+    idx = pointer_entry->history_head;
+    pointer_entry->history[idx].data.touch = info;
+    pointer_entry->history_head = (pointer_entry->history_head + 1) % MAX_POINTER_HISTORY;
+    if (pointer_entry->history_count < MAX_POINTER_HISTORY)
+        pointer_entry->history_count++;
+
+    pointer_entry->history[idx].data.pointer.historyCount = pointer_entry->history_count;
+
+    if (msg->message == WM_POINTERUP)
+        pointer_entry->active = FALSE;
 
     return TRUE;
 }
@@ -2711,7 +2715,7 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
     /* Store other info */
     info.hwndTarget = hwnd;
     info.dwTime = NtGetTickCount();
-    info.historyCount = 1;
+    info.historyCount = 1; // history is not saved for mouse
     info.InputData = 0;
     info.dwKeyStates = (NtUserGetKeyState(VK_SHIFT) & 0x8000 ? 0x0004 : 0) |
                         (NtUserGetKeyState(VK_CONTROL) & 0x8000 ? 0x0008 : 0);
@@ -2723,7 +2727,6 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
     pointer_entry->history_head = (pointer_entry->history_head + 1) % MAX_POINTER_HISTORY;
     if (pointer_entry->history_count < MAX_POINTER_HISTORY)
         pointer_entry->history_count++;
-    pointer_entry->history[idx].data.pointer.historyCount = pointer_entry->history_count;
     pointer_entry->active = TRUE;
     pointer_entry->pointer_id = pointer_id;
     pointer_entry->timestamp = NtGetTickCount();
