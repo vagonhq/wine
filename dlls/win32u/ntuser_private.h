@@ -120,17 +120,32 @@ struct mouse_tracking_info
     POINT last_mouse_message_pos;
 };
 
+#define MAX_POINTER_HISTORY 64
+
+struct pointer_history_entry
+{
+    DWORD timestamp;
+    union {
+        POINTER_INFO pointer;
+        POINTER_TOUCH_INFO touch;
+        POINTER_PEN_INFO pen;
+    } data;
+};
+
 struct pointer_info_entry
 {
     UINT32 pointer_id;
-    POINTER_INFO info;
-    BOOL valid;
+    POINTER_INPUT_TYPE type;
+    struct pointer_history_entry history[MAX_POINTER_HISTORY];
+    UINT32 history_head;
+    UINT32 history_count;
+    BOOL active;
     DWORD timestamp;
 };
 
 struct pointer_thread_data
 {
-    struct pointer_info_entry current[32];  /* Current pointer states, indexed by pointer_id */
+    struct pointer_info_entry pointers[32];  /* Current pointer states, indexed by pointer_id */
     UINT32 active_pointers;                  /* Bitmask of active pointer IDs */
     DWORD last_update_time;                  /* Timestamp of last update */
 };

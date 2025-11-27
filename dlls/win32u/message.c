@@ -2376,13 +2376,13 @@ static struct pointer_thread_data *get_pointer_thread_data(void)
 {
     struct user_thread_info *thread_info = get_user_thread_info();
     struct pointer_thread_data *data = thread_info->pointer_thread_data;
-    
+
     if (!data)
     {
         data = thread_info->pointer_thread_data = calloc(1, sizeof(struct pointer_thread_data));
         if (!data) return NULL;
     }
-    
+
     return data;
 }
 
@@ -2393,125 +2393,81 @@ static struct pointer_thread_data *get_pointer_thread_data(void)
  */
 static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware_msg_data *msg_data )
 {
-    struct pointer_thread_data *pointer_data;
-    POINTER_INFO *info;
-    UINT32 pointer_id;
     RECT rect;
 
-    TRACE("process_pointer_message \n");
     SetRect( &rect, LOWORD(msg->lParam), HIWORD(msg->lParam), LOWORD(msg->lParam), HIWORD(msg->lParam) );
     rect = map_rect_raw_to_virt( rect, get_thread_dpi() );
     msg->lParam = MAKELPARAM(rect.left, rect.top);
 
     msg->pt = point_phys_to_win_dpi( msg->hwnd, msg->pt );
-    /* Get pointer ID from wParam (this is where X11 driver should put it) */
-    pointer_id = LOWORD(msg->wParam);
-    
-    /* Validate pointer ID */
-    if (pointer_id >= 32)
-    {
-        WARN("Invalid pointer ID: %u\n", pointer_id);
-        return TRUE; /* Don't fail the message, just skip storage */
-    }
-    
-    /* Get or create thread-local pointer data storage */
-    pointer_data = get_pointer_thread_data();
-    if (!pointer_data)
-    {
-        ERR("Failed to allocate pointer thread data\n");
-        return TRUE; /* Continue processing message even if storage fails */
-    }
-    
-    /* Check if hardware message data contains POINTER_INFO */
-    if (msg_data && msg_data->size >= sizeof(*msg_data) + sizeof(POINTER_INFO))
-    {
-        /* Extract POINTER_INFO from hardware message data */
-        info = (POINTER_INFO *)((char *)msg_data + sizeof(*msg_data));
-        
-        TRACE("Storing pointer info: id=%u, type=%d, pos=(%d,%d), flags=0x%x\n",
-              info->pointerId, info->pointerType, 
-              info->ptPixelLocation.x, info->ptPixelLocation.y, info->pointerFlags);
-        
-        /* Store pointer information in thread-local storage */
-        pointer_data->current[pointer_id].pointer_id = info->pointerId;
-        pointer_data->current[pointer_id].info = *info;
-        pointer_data->current[pointer_id].valid = TRUE;
-        pointer_data->current[pointer_id].timestamp = NtGetTickCount();
-        
-        /* Update active pointers bitmask */
-        pointer_data->active_pointers |= (1 << pointer_id);
-        pointer_data->last_update_time = NtGetTickCount();
-    }
-    else
-    {
-        /* 
-         * Fallback: No POINTER_INFO in msg_data, construct minimal info from MSG
-         * This handles cases where X11 driver sends basic pointer messages
-         */
-        POINTER_INFO minimal_info = {0};
-        
-        minimal_info.pointerType = PT_MOUSE;  /* Assume mouse if not specified */
-        minimal_info.pointerId = pointer_id;
-        minimal_info.ptPixelLocation.x = rect.left;
-        minimal_info.ptPixelLocation.y = rect.top;
-        minimal_info.ptPixelLocationRaw = minimal_info.ptPixelLocation;
-        minimal_info.dwTime = msg->time;
-        minimal_info.hwndTarget = msg->hwnd;
-        
-        /* Set flags based on message type */
-        minimal_info.pointerFlags = POINTER_FLAG_PRIMARY | POINTER_FLAG_INRANGE;
-        
-        switch (msg->message)
-        {
-            case WM_POINTERDOWN:
-                minimal_info.pointerFlags |= POINTER_FLAG_DOWN | POINTER_FLAG_INCONTACT | POINTER_FLAG_FIRSTBUTTON;
-                minimal_info.ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_DOWN;
-                break;
-                
-            case WM_POINTERUP:
-                minimal_info.pointerFlags |= POINTER_FLAG_UP;
-                minimal_info.ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_UP;
-                break;
-                
-            case WM_POINTERUPDATE:
-                minimal_info.pointerFlags |= POINTER_FLAG_UPDATE | POINTER_FLAG_INCONTACT;
-                minimal_info.ButtonChangeType = POINTER_CHANGE_NONE;
-                break;
-                
-            case WM_POINTERENTER:
-                minimal_info.pointerFlags |= POINTER_FLAG_NEW;
-                break;
-                
-            case WM_POINTERLEAVE:
-                minimal_info.pointerFlags |= POINTER_FLAG_UPDATE;
-                break;
-        }
-        
-        minimal_info.historyCount = 1;
-        
-        TRACE("Storing minimal pointer info: id=%u, pos=(%d,%d), msg=0x%x\n",
-              pointer_id, minimal_info.ptPixelLocation.x, minimal_info.ptPixelLocation.y, msg->message);
-        
-        /* Store the constructed info */
-        pointer_data->current[pointer_id].pointer_id = minimal_info.pointerId;
-        pointer_data->current[pointer_id].info = minimal_info;
-        pointer_data->current[pointer_id].valid = TRUE;
-        pointer_data->current[pointer_id].timestamp = NtGetTickCount();
-        
-        /* Update active pointers bitmask */
-        pointer_data->active_pointers |= (1 << pointer_id);
-        pointer_data->last_update_time = NtGetTickCount();
-    }
-    
-    /* Handle pointer leaving/up - mark as inactive */
-    if (msg->message == WM_POINTERUP || msg->message == WM_POINTERLEAVE)
-    {
-        TRACE("Deactivating pointer: id=%u\n", pointer_id);
-        pointer_data->current[pointer_id].valid = FALSE;
-        pointer_data->active_pointers &= ~(1 << pointer_id);
-    }
-    
-    TRACE("Active pointers: 0x%08x\n", pointer_data->active_pointers);
+
+    // pointer_id = GET_POINTERID_WPARAM(msg->wParam);
+    // touch_data = get_pointer_touch_thread_data();
+    // if (!touch_data) return TRUE;
+    //
+    // for (UINT32 i = 0; i < ARRAY_SIZE(touch_data); i++)
+    // {
+    //     if (touch_data->touch[i].pointer_id == pointer_id && touch_data->touch[i].active)
+    //     {
+    //         touch = &touch_data->touch[i];
+    //         break;
+    //     }
+    //     if (!touch && !touch_data->touch[i].active)
+    //         touch = &touch_data->touch[i];
+    // }
+    //
+    // if (!touch) return;
+    //
+    // memset(&info, 0, sizeof(info));
+    // info.pointerInfo.pointerType = PT_TOUCH;
+    // info.pointerInfo.pointerId = pointer_id;
+    // info.pointerInfo.pointerFlags = 0;
+    //
+    // if (msg->message == WM_POINTERDOWN)
+    //     info.pointerInfo.pointerFlags |= POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+    // else if (msg->message == WM_POINTERUPDATE)
+    //     info.pointerInfo.pointerFlags |= POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+    // else if (msg->message == WM_POINTERUP)
+    //     info.pointerInfo.pointerFlags |= POINTER_FLAG_UP;
+    //
+    // info.pointerInfo.ptPixelLocation.x = rect->left;
+    // info.pointerInfo.ptPixelLocation.y = rect->top;
+    // info.pointerInfo.ptHimetricLocation.x = rect->left * 100;
+    // info.pointerInfo.ptHimetricLocation.y = rect->top * 100;
+    // info.pointerInfo.ptPixelLocationRaw = info.pointerInfo.ptPixelLocation;
+    // info.pointerInfo.ptHimetricLocationRaw = info.pointerInfo.ptHimetricLocation;
+    // info.pointerInfo.dwTime = msg->time;
+    // info.pointerInfo.hwndTarget = msg->hwnd;
+    // info.pointerInfo.sourceDevice = INVALID_HANDLE_VALUE;
+    //
+    // info.touchFlags = TOUCH_FLAG_NONE;
+    // info.touchMask = TOUCH_MASK_NONE;
+    // info.rcContact.left = rect->left;
+    // info.rcContact.top = rect->top;
+    // info.rcContact.right = rect->left;
+    // info.rcContact.bottom = rect->top;
+    // info.rcContactRaw = info.rcContact;
+    //
+    // if (msg->message == WM_POINTERDOWN && !touch->active)
+    // {
+    //     touch->active = TRUE;
+    //     touch->pointer_id = pointer_id;
+    //     touch->history_count = 0;
+    //     touch->history_head = 0;
+    // }
+    //
+    // idx = touch->history_head;
+    // touch->history[idx] = info;
+    // touch->history_head = (touch->history_head + 1) % MAX_POINTER_HISTORY;
+    // if (touch->history_count < MAX_POINTER_HISTORY)
+    //     touch->history_count++;
+    //
+    // touch->history[idx].pointerInfo.historyCount = touch->history_count;
+    // touch->last_update = msg->time;
+    //
+    // if (msg->message == WM_POINTERUP)
+    //     touch->active = FALSE;
+
     return TRUE;
 }
 
@@ -2665,93 +2621,117 @@ static void pixel_to_himetric(POINT *pixel, POINT *himetric)
 
 static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt, HWND hwnd )
 {
-    struct pointer_thread_data *pointer_data;
-    POINTER_INFO *info;
+    struct pointer_thread_data *pointer_data = NULL;
+    struct pointer_info_entry *pointer_entry = NULL;
+    POINTER_INFO info;
     UINT32 pointer_id = 1;  /* Mouse is always pointer ID 1 */
     WORD old_flags = 0;
     POINT himetric_location;
+    UINT32 idx;
+    UINT32 previous_idx;
     
     pointer_data = get_pointer_thread_data();
     if (!pointer_data) return;
     
-    info = &pointer_data->current[pointer_id].info;
+    for (UINT32 i = 0; i < ARRAY_SIZE(pointer_data->pointers); i++)
+    {
+        if (pointer_data->pointers[i].pointer_id == pointer_id && pointer_data->pointers[i].active)
+        {
+            pointer_entry = &pointer_data->pointers[i];
+            break;
+        }
+        if (!pointer_entry && !pointer_data->pointers[i].active)
+            pointer_entry = &pointer_data->pointers[i];
+    }
+
+    if (!pointer_entry) return;
+
+    memset(&info, 0, sizeof(info));
     
     /* Fill POINTER_INFO from mouse message parameters */
-    info->pointerType = PT_MOUSE;
-    info->pointerId = pointer_id;
-    info->frameId = NtGetTickCount();  /* Or use a frame counter */
+    info.pointerType = PT_MOUSE;
+    info.pointerId = pointer_id;
+    info.frameId = NtGetTickCount();  /* Or use a frame counter */
     
-    if (pointer_data->current[pointer_id].valid)
+    if (pointer_entry->active && pointer_entry->history_count > 0)
     {
+        previous_idx = (pointer_entry->history_head + MAX_POINTER_HISTORY - 1) % MAX_POINTER_HISTORY;
+        // pointer_entry->history[previous_idx].data.pointer.pointerFlags
         // Convert Windows flags back to Wine flags for comparison
-        if (info->pointerFlags & POINTER_FLAG_FIRSTBUTTON)
+        if (pointer_entry->history[previous_idx].data.pointer.pointerFlags & POINTER_FLAG_FIRSTBUTTON)
             old_flags |= POINTER_MESSAGE_FLAG_FIRSTBUTTON;
-        if (info->pointerFlags & POINTER_FLAG_SECONDBUTTON)
+        if (pointer_entry->history[previous_idx].data.pointer.pointerFlags & POINTER_FLAG_SECONDBUTTON)
             old_flags |= POINTER_MESSAGE_FLAG_SECONDBUTTON;
-        if (info->pointerFlags & POINTER_FLAG_THIRDBUTTON)
+        if (pointer_entry->history[previous_idx].data.pointer.pointerFlags & POINTER_FLAG_THIRDBUTTON)
             old_flags |= POINTER_MESSAGE_FLAG_THIRDBUTTON;
     }
 
     /* Convert Wine's pointer flags to Windows POINTER_FLAGS */
-    info->pointerFlags = 0;
+    info.pointerFlags = 0;
     if (flags & POINTER_MESSAGE_FLAG_INRANGE)
-        info->pointerFlags |= POINTER_FLAG_INRANGE;
+        info.pointerFlags |= POINTER_FLAG_INRANGE;
     if (flags & POINTER_MESSAGE_FLAG_INCONTACT)
-        info->pointerFlags |= POINTER_FLAG_INCONTACT;
+        info.pointerFlags |= POINTER_FLAG_INCONTACT;
     if (flags & POINTER_MESSAGE_FLAG_PRIMARY)
-        info->pointerFlags |= POINTER_FLAG_PRIMARY;
+        info.pointerFlags |= POINTER_FLAG_PRIMARY;
     if (flags & POINTER_MESSAGE_FLAG_FIRSTBUTTON)
-        info->pointerFlags |= POINTER_FLAG_FIRSTBUTTON;
+        info.pointerFlags |= POINTER_FLAG_FIRSTBUTTON;
     if (flags & POINTER_MESSAGE_FLAG_SECONDBUTTON)
-        info->pointerFlags |= POINTER_FLAG_SECONDBUTTON;
+        info.pointerFlags |= POINTER_FLAG_SECONDBUTTON;
     if (flags & POINTER_MESSAGE_FLAG_THIRDBUTTON)
-        info->pointerFlags |= POINTER_FLAG_THIRDBUTTON;
+        info.pointerFlags |= POINTER_FLAG_THIRDBUTTON;
     
     /* Set pointer state flags based on message type */
     switch (message)
     {
         case WM_POINTERDOWN:
-            info->pointerFlags |= POINTER_FLAG_DOWN;
+            info.pointerFlags |= POINTER_FLAG_DOWN;
             break;
         case WM_POINTERUP:
-            info->pointerFlags |= POINTER_FLAG_UP;
+            info.pointerFlags |= POINTER_FLAG_UP;
             break;
         case WM_POINTERUPDATE:
-            info->pointerFlags |= POINTER_FLAG_UPDATE;
-            info->ButtonChangeType = POINTER_CHANGE_NONE;
+            info.pointerFlags |= POINTER_FLAG_UPDATE;
+            info.ButtonChangeType = POINTER_CHANGE_NONE;
             break;
         default:
-            info->ButtonChangeType = POINTER_CHANGE_NONE;
+            info.ButtonChangeType = POINTER_CHANGE_NONE;
             break;
     }
     
-    info->ButtonChangeType = get_button_change_type(message, flags, old_flags);
+    info.ButtonChangeType = get_button_change_type(message, flags, old_flags);
     /* Store position */
-    info->ptPixelLocation.x = pt.x;
-    info->ptPixelLocation.y = pt.y;
-    info->ptPixelLocationRaw = pt;
+    info.ptPixelLocation.x = pt.x;
+    info.ptPixelLocation.y = pt.y;
+    info.ptPixelLocationRaw = pt;
 
     pixel_to_himetric(&pt, &himetric_location);
-    info->ptHimetricLocation = himetric_location;
-    info->ptHimetricLocationRaw = himetric_location;
+    info.ptHimetricLocation = himetric_location;
+    info.ptHimetricLocationRaw = himetric_location;
     /* Store other info */
-    info->hwndTarget = hwnd;
-    info->dwTime = NtGetTickCount();
-    info->historyCount = 1;
-    info->InputData = 0;
-    info->dwKeyStates = (NtUserGetKeyState(VK_SHIFT) & 0x8000 ? 0x0004 : 0) |
+    info.hwndTarget = hwnd;
+    info.dwTime = NtGetTickCount();
+    info.historyCount = 1;
+    info.InputData = 0;
+    info.dwKeyStates = (NtUserGetKeyState(VK_SHIFT) & 0x8000 ? 0x0004 : 0) |
                         (NtUserGetKeyState(VK_CONTROL) & 0x8000 ? 0x0008 : 0);
-    info->sourceDevice = INVALID_HANDLE_VALUE;
-    NtQueryPerformanceCounter((LARGE_INTEGER *)&info->PerformanceCount, NULL);
+    info.sourceDevice = INVALID_HANDLE_VALUE;
+    NtQueryPerformanceCounter((LARGE_INTEGER *)&info.PerformanceCount, NULL);
     
-    /* Update entry state */
-    pointer_data->current[pointer_id].pointer_id = pointer_id;
-    pointer_data->current[pointer_id].valid = TRUE;
-    pointer_data->current[pointer_id].timestamp = NtGetTickCount();
-    pointer_data->active_pointers |= (1 << pointer_id);
+    idx = pointer_entry->history_head;
+    pointer_entry->history[idx].data.pointer = info;
+    pointer_entry->history_head = (pointer_entry->history_head + 1) % MAX_POINTER_HISTORY;
+    if (pointer_entry->history_count < MAX_POINTER_HISTORY)
+        pointer_entry->history_count++;
+    pointer_entry->history[idx].data.pointer.historyCount = pointer_entry->history_count;
+    pointer_entry->active = TRUE;
+    pointer_entry->pointer_id = pointer_id;
+    pointer_entry->timestamp = NtGetTickCount();
+    pointer_entry->history[idx].timestamp = pointer_entry->timestamp;
+    pointer_data->active_pointers |= (1 << idx);
     
     TRACE("Updated pointer state: id=%u, pos=(%d,%d), flags=0x%x, msg=0x%x\n",
-          pointer_id, pt.x, pt.y, info->pointerFlags, message);
+          pointer_id, pt.x, pt.y, info.pointerFlags, message);
 }
 
 /***********************************************************************

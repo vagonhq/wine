@@ -2836,14 +2836,28 @@ static struct pointer_thread_data *get_pointer_thread_data(void)
 {
     struct user_thread_info *thread_info = get_user_thread_info();
     struct pointer_thread_data *data = thread_info->pointer_thread_data;
-    
+
     if (!data)
     {
         data = thread_info->pointer_thread_data = calloc(1, sizeof(struct pointer_thread_data));
         if (!data) return NULL;
     }
-    
+
     return data;
+}
+
+static POINTER_INFO *get_base_pointer_info(struct pointer_info_entry *entry, struct pointer_history_entry *hist)
+{
+    switch (entry->type)
+    {
+        case PT_TOUCH:
+        case PT_TOUCHPAD:
+            return &hist->data.touch.pointerInfo;
+        case PT_PEN:
+            return &hist->data.pen.pointerInfo;
+        default:
+            return &hist->data.pointer;
+    }
 }
 
 /**********************************************************************
@@ -2854,9 +2868,11 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
 {
     struct pointer_thread_data *data;
     POINTER_INFO *output;
-    UINT32 count = 0;
-    UINT32 max_entries;
-    UINT32 total_valid = 0;
+    POINTER_INFO *base_pointer_info;
+    // UINT32 count = 0;
+    // UINT32 max_entries;
+    UINT32 idx = 0;
+    UINT32 history_head;
 
     TRACE("id=%u, type=%d, size=%zu, entry_count=%p, pointer_count=%p, info=%p\n",
           id, (int)type, (size_t)size, entry_count, pointer_count, pointer_info);
@@ -2890,7 +2906,7 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
         return FALSE;
     }
     /* Store max entries requested (for later use) */
-    max_entries = *entry_count;
+    // max_entries = *entry_count;
     
     /*
      * STEP 2: Get thread-local pointer data
@@ -2904,86 +2920,74 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
         RtlSetLastWin32Error(ERROR_OUTOFMEMORY);
         return FALSE;
     }
-    
-    for (UINT32 i = 0; i < 32; i++)
-    {
-        if (data->current[i].valid) total_valid++;
-    }
 
-    TRACE("active pointers %u last update %u total valid %u", data->active_pointers, data->last_update_time, total_valid);
-    
     /*
      * STEP 5: Handle query for specific pointer ID
      * When id != 0, return only that specific pointer
      */
     
-    if (id != 0)
+    for (UINT32 i = 0; i < ARRAY_SIZE(data->pointers); i++)
     {
-        /* Validate pointer ID range */
-        if (id >= 32)
+        if (data->pointers[i].pointer_id == id)
         {
-            WARN("Invalid pointer ID: %u\n", id);
-            RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
-            return FALSE;
+            idx = i;
+            break;
         }
-        
-        /* Check if pointer exists and is valid */
-        if (!data->current[id].valid)
-        {
-            WARN("Pointer ID %u not active\n", id);
-            RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
-            return FALSE;
-        }
-        
-        /* Copy the single pointer info */
-        output[0] = data->current[id].info;
-        *entry_count = 1;
-        *pointer_count = 1;
-        
-        TRACE("Returning single pointer ID %u\n", id);
-        return TRUE;
     }
+    if (!data->pointers[idx].active || data->pointers[idx].pointer_id != id)
+    {
+        RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    history_head = (data->pointers[idx].history_head + MAX_POINTER_HISTORY - 1) % MAX_POINTER_HISTORY;
+    base_pointer_info = get_base_pointer_info(&data->pointers[idx], &data->pointers[idx].history[history_head]);
+    output[0] = *base_pointer_info;
+    *entry_count = 1;
+    *pointer_count = 1;
+
+    TRACE("Returning single pointer ID %u\n", id);
+    return TRUE;
     
     /*
      * STEP 6: Return all matching active pointers
      * Fill up to max_entries pointers into the output buffer
      */
     
-    for (UINT32 i = 0; i < 32 && count < max_entries; i++)
-    {
-        /* Skip inactive pointers */
-        if (!(data->active_pointers & (1 << i)))
-            continue;
-        
-        /* Skip invalid pointers */
-        if (!data->current[i].valid)
-            continue;
-        
-        /* Apply type filter */
-        if (type != PT_POINTER && data->current[i].info.pointerType != type)
-            continue;
-        
-        /* Copy pointer info to output buffer */
-        output[count] = data->current[i].info;
-        count++;
-    }
+    // for (UINT32 i = 0; i < 32 && count < max_entries; i++)
+    // {
+    //     /* Skip inactive pointers */
+    //     if (!(data->active_pointers & (1 << i)))
+    //         continue;
+    //
+    //     /* Skip invalid pointers */
+    //     if (!data->current[i].valid)
+    //         continue;
+    //
+    //     /* Apply type filter */
+    //     if (type != PT_POINTER && data->current[i].info.pointerType != type)
+    //         continue;
+    //
+    //     /* Copy pointer info to output buffer */
+    //     output[count] = data->current[i].info;
+    //     count++;
+    // }
     
     /*
      * STEP 7: Check if we have any data to return
      */
     
-    if (count == 0)
-    {
-        WARN("No pointer data available\n");
-        RtlSetLastWin32Error(ERROR_NO_DATA);
-        return FALSE;
-    }
-    
-    *entry_count = count;
-    *pointer_count = count;
-
-    TRACE("Returning %u pointer(s)\n", count);
-    return TRUE;
+    // if (count == 0)
+    // {
+    //     WARN("No pointer data available\n");
+    //     RtlSetLastWin32Error(ERROR_NO_DATA);
+    //     return FALSE;
+    // }
+    //
+    // *entry_count = count;
+    // *pointer_count = count;
+    //
+    // TRACE("Returning %u pointer(s)\n", count);
+    // return TRUE;
 }
 
 BOOL get_clip_cursor( RECT *rect, UINT dpi, MONITOR_DPI_TYPE type )
