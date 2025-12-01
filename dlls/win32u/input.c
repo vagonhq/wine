@@ -2890,9 +2890,6 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
         RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
         return FALSE;
     }
-    /* Store max entries requested (for later use) */
-    // max_entries = *entry_count;
-    
     /*
      * STEP 2: Get thread-local pointer data
      * This data is populated by X11 driver when pointer events occur
@@ -2906,11 +2903,6 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
         return FALSE;
     }
 
-    /*
-     * STEP 5: Handle query for specific pointer ID
-     * When id != 0, return only that specific pointer
-     */
-    
     for (UINT32 i = 0; i < ARRAY_SIZE(data->pointers); i++)
     {
         if (data->pointers[i].pointer_id == id)
@@ -2920,9 +2912,9 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
         }
     }
     pointer_entry = &data->pointers[idx];
-    // if (!pointer_entry->active || pointer_entry->pointer_id != id)
     if (pointer_entry->pointer_id != id)
     {
+        TRACE("pointer_entry->pointer_id != id return\n");
         RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
@@ -2930,12 +2922,14 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
     if (*entry_count == 0)
     {
         *entry_count = pointer_entry->history_count;
+        TRACE("entry count==0 return\n");
         return TRUE;
     }
     history_head = (pointer_entry->history_head + MAX_POINTER_HISTORY - 1) % MAX_POINTER_HISTORY;
     return_count = min(*entry_count, pointer_entry->history[history_head].data.pointer.historyCount);
     if (type != pointer_entry->type || pointer_entry->type == PT_MOUSE)
     {
+        TRACE( "copying mouse or non compatible count %u wanted type %d  entry type %d\n", return_count, (int)type, (int)pointer_entry->type );
         for (UINT32 i = 0; i < return_count; i++)
         {
             UINT32 copy_idx = (pointer_entry->history_head - 1 - i + MAX_POINTER_HISTORY) % MAX_POINTER_HISTORY;
@@ -2943,15 +2937,16 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
         }
         *entry_count = return_count;
         *pointer_count = 1;
+        TRACE("copy non touch last return\n");
         return TRUE;
     }
 
     if (type == PT_TOUCH)
     {
-        TRACE( "Copying touch count %u\n", return_count );
+        TRACE( "copying touch count %u\n", return_count );
         for (UINT32 i = 0; i < return_count; i++)
         {
-            UINT32 copy_idx = (pointer_entry->history_head - 1 - i + MAX_POINTER_HISTORY) % MAX_POINTER_HISTORY;
+            UINT32 copy_idx = (pointer_entry->history_head + MAX_POINTER_HISTORY - 1 - i) % MAX_POINTER_HISTORY;
             ((POINTER_TOUCH_INFO*)pointer_info)[i] = pointer_entry->history[copy_idx].data.touch;
         }
     }
@@ -2959,12 +2954,13 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
     {
         for (UINT32 i = 0; i < return_count; i++)
         {
-            UINT32 copy_idx = (pointer_entry->history_head - 1 - i + MAX_POINTER_HISTORY) % MAX_POINTER_HISTORY;
+            UINT32 copy_idx = (pointer_entry->history_head + MAX_POINTER_HISTORY - 1 - i) % MAX_POINTER_HISTORY;
             ((POINTER_PEN_INFO*)pointer_info)[i] = pointer_entry->history[copy_idx].data.pen;
         }
     }
     *entry_count = return_count;
     *pointer_count = 1;
+    TRACE("last return\n");
     return TRUE;
 }
 

@@ -2398,6 +2398,7 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
     POINTER_TOUCH_INFO info;
     RECT rect;
     UINT32 pointer_id;
+    // UINT32 idx, prev_idx;
     UINT32 idx;
 
     SetRect( &rect, LOWORD(msg->lParam), HIWORD(msg->lParam), LOWORD(msg->lParam), HIWORD(msg->lParam) );
@@ -2421,7 +2422,23 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
             pointer_entry = &pointer_data->pointers[i];
     }
 
-    if (!pointer_entry) return TRUE;
+    if (!pointer_entry)
+    {
+        WARN("Cannot add touch event");
+        return TRUE;
+    }
+
+    if (pointer_entry->history_count > 0)
+    {
+        UINT32 prev_idx;
+        prev_idx = (pointer_entry->history_head + MAX_POINTER_HISTORY - 1) % MAX_POINTER_HISTORY;
+        if (pointer_entry->history[prev_idx].data.pointer.ptPixelLocation.x == rect.left &&
+            pointer_entry->history[prev_idx].data.pointer.ptPixelLocation.y == rect.top)
+        {
+            pointer_entry->history_head = 0;
+            pointer_entry->history_count = 0;
+        }
+    }
 
     memset(&info, 0, sizeof(info));
     info.pointerInfo.pointerType = PT_TOUCH;
@@ -2453,10 +2470,11 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
     info.rcContact.bottom = rect.bottom;
     info.rcContactRaw = info.rcContact;
 
+    pointer_entry->pointer_id = pointer_id;
+    pointer_entry->type = PT_TOUCH;
     if (msg->message == WM_POINTERDOWN && !pointer_entry->active)
     {
         pointer_entry->active = TRUE;
-        pointer_entry->pointer_id = pointer_id;
         pointer_entry->history_count = 0;
         pointer_entry->history_head = 0;
     }
