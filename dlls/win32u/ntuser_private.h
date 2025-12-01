@@ -146,7 +146,6 @@ struct pointer_info_entry
 struct pointer_thread_data
 {
     struct pointer_info_entry pointers[32];  /* Current pointer states, indexed by pointer_id */
-    UINT32 active_pointers;                  /* Bitmask of active pointer IDs */
     DWORD last_update_time;                  /* Timestamp of last update */
 };
 

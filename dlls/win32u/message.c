@@ -20,6 +20,7 @@
  */
 
 
+#include <limits.h>
 #if 0
 #pragma makedep unix
 #endif
@@ -2398,8 +2399,10 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
     POINTER_TOUCH_INFO info;
     RECT rect;
     UINT32 pointer_id;
-    // UINT32 idx, prev_idx;
     UINT32 idx;
+    UINT32 chosen=0;
+    DWORD oldest_timestamp = UINT_MAX;
+    UINT32 oldest_pointer_idx = UINT_MAX, free_slot = UINT_MAX;
 
     SetRect( &rect, LOWORD(msg->lParam), HIWORD(msg->lParam), LOWORD(msg->lParam), HIWORD(msg->lParam) );
     rect = map_rect_raw_to_virt( rect, get_thread_dpi() );
@@ -2416,15 +2419,34 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
         if (pointer_data->pointers[i].pointer_id == pointer_id && pointer_data->pointers[i].active)
         {
             pointer_entry = &pointer_data->pointers[i];
+            chosen = i;
             break;
         }
-        if (!pointer_entry && !pointer_data->pointers[i].active)
-            pointer_entry = &pointer_data->pointers[i];
+        if (free_slot == UINT_MAX && pointer_data->pointers[i].pointer_id == 0) free_slot = i;
+        if (!pointer_data->pointers[i].active && oldest_timestamp > pointer_data->pointers[i].timestamp) {
+            oldest_timestamp = pointer_data->pointers[i].timestamp;
+            oldest_pointer_idx = i;
+        }
     }
+    if (!pointer_entry)
+    {
+        if (free_slot != UINT_MAX)
+        {
+            pointer_entry = &pointer_data->pointers[free_slot];
+            chosen = free_slot;
+        }
+        else if (oldest_pointer_idx != UINT_MAX)
+        {
+            pointer_entry = &pointer_data->pointers[oldest_pointer_idx];
+            chosen = oldest_pointer_idx;
+        }
+    }
+
+    WARN("chosen pointer idx %u\n", chosen);
 
     if (!pointer_entry)
     {
-        WARN("Cannot add touch event");
+        WARN("Cannot add touch event\n");
         return TRUE;
     }
 
@@ -2749,7 +2771,6 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
     pointer_entry->pointer_id = pointer_id;
     pointer_entry->timestamp = NtGetTickCount();
     pointer_entry->history[idx].timestamp = pointer_entry->timestamp;
-    pointer_data->active_pointers |= (1 << idx);
     
     TRACE("Updated pointer state: id=%u, pos=(%d,%d), flags=0x%x, msg=0x%x\n",
           pointer_id, pt.x, pt.y, info.pointerFlags, message);
