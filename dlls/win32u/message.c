@@ -2397,6 +2397,24 @@ static void pixel_to_himetric(POINT *pixel, POINT *himetric)
     himetric->y = (pixel->y * 2540) / dpi_y;
 }
 
+static UINT32 get_frame_id_for_timestamp(DWORD event_timestamp)
+{
+    struct pointer_thread_data *pointer_data = get_pointer_thread_data();
+    if (!pointer_data) return 0;
+
+    /* If this is a new timestamp, allocate a new frame ID */
+    if (event_timestamp != pointer_data->last_update_time)
+    {
+        pointer_data->current_frame_id++;
+        pointer_data->last_update_time = event_timestamp;
+        TRACE("New frame %u for timestamp %u\n",
+              pointer_data->current_frame_id, event_timestamp);
+    }
+
+    /* Return the current frame ID (shared by all events with this timestamp) */
+    return pointer_data->current_frame_id;
+}
+
 /***********************************************************************
  *          process_pointer_message
  *
@@ -2517,6 +2535,7 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
         pointer_entry->history_count++;
 
     pointer_entry->history[idx].data.pointer.historyCount = pointer_entry->history_count;
+    pointer_entry->history[idx].data.pointer.frameId = get_frame_id_for_timestamp(msg->time);
 
     if (msg->message == WM_POINTERUP)
         pointer_entry->active = FALSE;
@@ -2662,7 +2681,7 @@ static POINTER_BUTTON_CHANGE_TYPE get_button_change_type(UINT message, WORD new_
     return POINTER_CHANGE_NONE;  // = 0
 }
 
-static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt, HWND hwnd )
+static void update_pointer_state_from_mouse( UINT message, DWORD timestamp, WORD flags, POINT pt, HWND hwnd )
 {
     struct pointer_thread_data *pointer_data = NULL;
     struct pointer_info_entry *pointer_entry = NULL;
@@ -2694,7 +2713,7 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
     /* Fill POINTER_INFO from mouse message parameters */
     info.pointerType = PT_MOUSE;
     info.pointerId = pointer_id;
-    info.frameId = NtGetTickCount();  /* Or use a frame counter */
+    info.frameId = get_frame_id_for_timestamp(timestamp);
     
     if (pointer_entry->active && pointer_entry->history_count > 0)
     {
@@ -2753,7 +2772,7 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
     info.ptHimetricLocationRaw = himetric_location;
     /* Store other info */
     info.hwndTarget = hwnd;
-    info.dwTime = NtGetTickCount();
+    info.dwTime = timestamp;
     info.historyCount = 1; // history is not saved for mouse
     info.InputData = 0;
     info.dwKeyStates = (NtUserGetKeyState(VK_SHIFT) & 0x8000 ? 0x0004 : 0) |
@@ -2768,8 +2787,7 @@ static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt,
         pointer_entry->history_count++;
     pointer_entry->active = TRUE;
     pointer_entry->pointer_id = pointer_id;
-    pointer_entry->timestamp = NtGetTickCount();
-    pointer_entry->history[idx].timestamp = pointer_entry->timestamp;
+    pointer_entry->timestamp = timestamp;
     
     TRACE("Updated pointer state: id=%u, pos=(%d,%d), flags=0x%x, msg=0x%x\n",
           pointer_id, pt.x, pt.y, info.pointerFlags, message);
@@ -2879,7 +2897,7 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
         TRACE("dispatching pointer message %u\n", message);
         if (message)
         {
-            update_pointer_state_from_mouse( message, flags, msg->pt, msg->hwnd );
+            update_pointer_state_from_mouse( message, msg->time, flags, msg->pt, msg->hwnd );
             send_message( msg->hwnd, message, MAKELONG( 1, flags ), MAKELONG( msg->pt.x, msg->pt.y ) );
         }
     }

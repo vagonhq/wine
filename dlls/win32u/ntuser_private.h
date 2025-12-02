@@ -124,7 +124,6 @@ struct mouse_tracking_info
 
 struct pointer_history_entry
 {
-    DWORD timestamp;
     union {
         POINTER_INFO pointer;
         POINTER_TOUCH_INFO touch;
@@ -147,6 +146,7 @@ struct pointer_thread_data
 {
     struct pointer_info_entry pointers[32];  /* Current pointer states, indexed by pointer_id */
     DWORD last_update_time;                  /* Timestamp of last update */
+    UINT32 current_frame_id;
 };
 
 /* this is the structure stored in TEB->Win32ClientInfo */
