@@ -2387,6 +2387,16 @@ static struct pointer_thread_data *get_pointer_thread_data(void)
     return data;
 }
 
+static void pixel_to_himetric(POINT *pixel, POINT *himetric)
+{
+    HDC hdc = NtUserGetDC(NULL);
+    int dpi_x = hdc ? NtGdiGetDeviceCaps(hdc, LOGPIXELSX) : 96;
+    int dpi_y = hdc ? NtGdiGetDeviceCaps(hdc, LOGPIXELSY) : 96;
+    if (hdc) NtUserReleaseDC(NULL, hdc);
+    himetric->x = (pixel->x * 2540) / dpi_x;
+    himetric->y = (pixel->y * 2540) / dpi_y;
+}
+
 /***********************************************************************
  *          process_pointer_message
  *
@@ -2476,8 +2486,7 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
 
     info.pointerInfo.ptPixelLocation.x = rect.left;
     info.pointerInfo.ptPixelLocation.y = rect.top;
-    info.pointerInfo.ptHimetricLocation.x = rect.left * 100;
-    info.pointerInfo.ptHimetricLocation.y = rect.top * 100;
+    pixel_to_himetric(&msg->pt, &info.pointerInfo.ptHimetricLocation);
     info.pointerInfo.ptPixelLocationRaw = info.pointerInfo.ptPixelLocation;
     info.pointerInfo.ptHimetricLocationRaw = info.pointerInfo.ptHimetricLocation;
     info.pointerInfo.dwTime = msg->time;
@@ -2653,16 +2662,6 @@ static POINTER_BUTTON_CHANGE_TYPE get_button_change_type(UINT message, WORD new_
     return POINTER_CHANGE_NONE;  // = 0
 }
 
-static void pixel_to_himetric(POINT *pixel, POINT *himetric)
-{
-    HDC hdc = NtUserGetDC(NULL);
-    int dpi_x = hdc ? NtGdiGetDeviceCaps(hdc, LOGPIXELSX) : 96;
-    int dpi_y = hdc ? NtGdiGetDeviceCaps(hdc, LOGPIXELSY) : 96;
-    if (hdc) NtUserReleaseDC(NULL, hdc);
-    himetric->x = (pixel->x * 2540) / dpi_x;
-    himetric->y = (pixel->y * 2540) / dpi_y;
-}
-
 static void update_pointer_state_from_mouse( UINT message, WORD flags, POINT pt, HWND hwnd )
 {
     struct pointer_thread_data *pointer_data = NULL;
@@ -2796,7 +2795,7 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
     WPARAM wparam;
 
     /* find the window to dispatch this mouse message to */
-    TRACE("process_mouse_message");
+    TRACE("process_mouse_message\n");
 
     info.cbSize = sizeof(info);
     NtUserGetGUIThreadInfo( GetCurrentThreadId(), &info );
