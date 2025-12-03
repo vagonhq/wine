@@ -2373,20 +2373,6 @@ static void send_parent_notify( HWND hwnd, WORD event, WORD idChild, POINT pt )
     }
 }
 
-static struct pointer_thread_data *get_pointer_thread_data(void)
-{
-    struct user_thread_info *thread_info = get_user_thread_info();
-    struct pointer_thread_data *data = thread_info->pointer_thread_data;
-
-    if (!data)
-    {
-        data = thread_info->pointer_thread_data = calloc(1, sizeof(struct pointer_thread_data));
-        if (!data) return NULL;
-    }
-
-    return data;
-}
-
 static void pixel_to_himetric(POINT *pixel, POINT *himetric)
 {
     HDC hdc = NtUserGetDC(NULL);
@@ -2407,8 +2393,6 @@ static UINT32 get_frame_id_for_timestamp(DWORD event_timestamp)
     {
         pointer_data->current_frame_id++;
         pointer_data->last_update_time = event_timestamp;
-        TRACE("New frame %u for timestamp %u\n",
-              pointer_data->current_frame_id, event_timestamp);
     }
 
     /* Return the current frame ID (shared by all events with this timestamp) */
@@ -2431,20 +2415,25 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
     UINT32 chosen=0;
     DWORD oldest_timestamp = UINT_MAX;
     UINT32 oldest_pointer_idx = UINT_MAX, free_slot = UINT_MAX;
-
+    struct ntuser_thread_info *thread_info = NULL;
+    DWORD thread_id = 0;
     SetRect( &rect, LOWORD(msg->lParam), HIWORD(msg->lParam), LOWORD(msg->lParam), HIWORD(msg->lParam) );
     rect = map_rect_raw_to_virt( rect, get_thread_dpi() );
     msg->lParam = MAKELPARAM(rect.left, rect.top);
 
     msg->pt = point_phys_to_win_dpi( msg->hwnd, msg->pt );
 
+    if (msg->message != WM_POINTERDOWN && msg->message != WM_POINTERUPDATE && msg->message != WM_POINTERUP) return TRUE;
     pointer_id = GET_POINTERID_WPARAM(msg->wParam);
     pointer_data  = get_pointer_thread_data();
-    if (!pointer_data  ) return TRUE;
-
+    if (!pointer_data) return TRUE;
+    thread_info = NtUserGetThreadInfo();
+    thread_id = GetCurrentThreadId();
+    WARN("SEARCH id %u frameID %u timestamp %u msg %#x p_pointer %p thread_p %p thread_id %u\n", pointer_id, pointer_data->current_frame_id, pointer_data->last_update_time, msg->message, pointer_data, thread_info, thread_id );
     for (UINT32 i = 0; i < ARRAY_SIZE(pointer_data->pointers); i++)
     {
-        if (pointer_data->pointers[i].pointer_id == pointer_id && pointer_data->pointers[i].active)
+        WARN("LOOP idx %u pointerid %u type %d active %d\n", i, pointer_data->pointers[i].pointer_id, (int)pointer_data->pointers[i].type, (int)pointer_data->pointers[i].active);
+        if (pointer_data->pointers[i].pointer_id == pointer_id)
         {
             pointer_entry = &pointer_data->pointers[i];
             chosen = i;
@@ -2462,11 +2451,13 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
         {
             pointer_entry = &pointer_data->pointers[free_slot];
             chosen = free_slot;
+            WARN("chosen free pointer idx %u\n", chosen);
         }
         else if (oldest_pointer_idx != UINT_MAX)
         {
             pointer_entry = &pointer_data->pointers[oldest_pointer_idx];
             chosen = oldest_pointer_idx;
+            WARN("chosen oldest pointer idx %u\n", chosen);
         }
     }
 
@@ -2485,20 +2476,23 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
         if (pointer_entry->history[prev_idx].data.pointer.ptPixelLocation.x == rect.left &&
             pointer_entry->history[prev_idx].data.pointer.ptPixelLocation.y == rect.top)
         {
+            WARN("OVERWRITE prev_idx %u\n", prev_idx);
             pointer_entry->history_head = 0;
             pointer_entry->history_count = 0;
         }
+        // if (pointer_entry->history[prev_idx].data.pointer.pointerFlags & POINTER_FLAG_PRIMARY && pointer_entry->active)
+        //     info.pointerInfo.pointerFlags |= POINTER_FLAG_PRIMARY;
     }
 
     memset(&info, 0, sizeof(info));
     info.pointerInfo.pointerType = PT_TOUCH;
     info.pointerInfo.pointerId = pointer_id;
-    info.pointerInfo.pointerFlags = 0;
+    info.pointerInfo.pointerFlags = POINTER_FLAG_PRIMARY;//POINTER_FLAG_NONE;
 
     if (msg->message == WM_POINTERDOWN)
-        info.pointerInfo.pointerFlags |= POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+        info.pointerInfo.pointerFlags |= POINTER_FLAG_NEW | POINTER_FLAG_FIRSTBUTTON | POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
     else if (msg->message == WM_POINTERUPDATE)
-        info.pointerInfo.pointerFlags |= POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+        info.pointerInfo.pointerFlags |= POINTER_FLAG_FIRSTBUTTON | POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
     else if (msg->message == WM_POINTERUP)
         info.pointerInfo.pointerFlags |= POINTER_FLAG_UP;
 
@@ -2518,10 +2512,11 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
     info.rcContact.right = rect.right;
     info.rcContact.bottom = rect.bottom;
     info.rcContactRaw = info.rcContact;
+    NtQueryPerformanceCounter((LARGE_INTEGER *)&info.pointerInfo.PerformanceCount, NULL);
 
     pointer_entry->pointer_id = pointer_id;
     pointer_entry->type = PT_TOUCH;
-    if (msg->message == WM_POINTERDOWN && !pointer_entry->active)
+    if (msg->message == WM_POINTERDOWN)
     {
         pointer_entry->active = TRUE;
         pointer_entry->history_count = 0;
@@ -2537,8 +2532,9 @@ static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware
     pointer_entry->history[idx].data.pointer.historyCount = pointer_entry->history_count;
     pointer_entry->history[idx].data.pointer.frameId = get_frame_id_for_timestamp(msg->time);
 
+    WARN("RETURN pointer flag %#x frameid %u p_pointer %p p_pointer_temp %p\n", info.pointerInfo.pointerFlags, pointer_entry->history[idx].data.pointer.frameId, &pointer_data->pointers[chosen], pointer_entry);
     if (msg->message == WM_POINTERUP)
-        pointer_entry->active = FALSE;
+       pointer_entry->active = FALSE;
 
     return TRUE;
 }

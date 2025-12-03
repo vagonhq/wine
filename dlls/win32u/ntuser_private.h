@@ -182,6 +182,20 @@ static inline struct user_thread_info *get_user_thread_info(void)
     return CONTAINING_RECORD( NtUserGetThreadInfo(), struct user_thread_info, client_info );
 }
 
+static inline struct pointer_thread_data *get_pointer_thread_data(void)
+{
+    struct user_thread_info *thread_info = get_user_thread_info();
+    struct pointer_thread_data *data = thread_info->pointer_thread_data;
+
+    if (!data)
+    {
+        data = thread_info->pointer_thread_data = calloc(1, sizeof(struct pointer_thread_data));
+        if (!data) return NULL;
+    }
+
+    return data;
+}
+
 struct hook_extra_info
 {
     HHOOK handle;
