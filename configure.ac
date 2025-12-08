@@ -2123,6 +2123,8 @@ AC_CHECK_FUNCS(\
 	prctl \
 	sched_getcpu \
 	sched_yield \
+	renameat \
+	renameat2 \
 	setproctitle \
 	setprogname \
 	sigprocmask \
